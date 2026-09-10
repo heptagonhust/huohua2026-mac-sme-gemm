@@ -49,9 +49,9 @@ bool allocate_size(std::size_t rows, std::size_t columns,
 
 template <typename Function>
 double measure_ms(Function function) {
-    const auto start = Clock::now();
+    const auto start = std::chrono::high_resolution_clock::now();
     function();
-    const auto end = Clock::now();
+    const auto end = std::chrono::high_resolution_clock::now();
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
@@ -67,6 +67,58 @@ bool matches(const std::vector<float>& actual,
         }
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Warm-up
+//
+// The machine needs a sustained burst of load before it reaches the clock and
+// power state in which the later shapes are measured: a purely scalar
+// dependent-FMA probe runs ~4.5x faster after ~100 ms of load than at process
+// start, and the SME kernel needs that plus its own power-state ramp.  A fixed
+// handful of calls is therefore useless -- the first measured shapes would stay
+// slower than the later ones.  Warm up for a *time budget* instead.
+// ---------------------------------------------------------------------------
+constexpr std::size_t kWarmUpSize = 256;    // fixed square warm-up problem
+constexpr double kWarmUpMs = 100.0;         // sustained warm-up time budget
+constexpr int kWarmUpMaxRepeats = 1000000;  // safety cap
+
+void warm_up_machine(std::size_t N, std::size_t M, std::size_t K,
+                     double min_ms) {
+    std::size_t a_size;
+    std::size_t b_size;
+    std::size_t c_size;
+    if (N == 0 || M == 0 || K == 0 ||
+        !allocate_size(N, M, &a_size) ||
+        !allocate_size(M, K, &b_size) ||
+        !allocate_size(N, K, &c_size)) {
+        return;
+    }
+
+    // Dedicated buffers and generator: the measured run's data stays
+    // bit-for-bit identical to a run without warm-up.
+    std::vector<__fp16> A(a_size);
+    std::vector<__fp16> B(b_size);
+    std::vector<float> C(c_size, 0.0f);
+    std::mt19937 generator(12345);
+    std::uniform_real_distribution<float> distribution(-1.0f, 1.0f);
+    for (__fp16& value : A) {
+        value = static_cast<__fp16>(distribution(generator));
+    }
+    for (__fp16& value : B) {
+        value = static_cast<__fp16>(distribution(generator));
+    }
+
+    const auto start = Clock::now();
+    for (int repeat = 0; repeat < kWarmUpMaxRepeats; ++repeat) {
+        gemm_fp16(A.data(), B.data(), C.data(), N, M, K);
+        const double elapsed_ms =
+            std::chrono::duration<double, std::milli>(Clock::now() - start)
+                .count();
+        if (elapsed_ms >= min_ms) {
+            break;
+        }
+    }
 }
 
 }  // namespace
@@ -97,6 +149,12 @@ int main(int argc, char** argv) {
 
     std::mt19937 generator(12345);
     std::uniform_real_distribution<float> distribution(-1.0f, 1.0f);
+
+    // Warm up the machine (core clock / SME power state) and the kernel path
+    // before any shape is measured, otherwise the first shapes come out
+    // systematically slower than the later ones.
+    warm_up_machine(kWarmUpSize, kWarmUpSize, kWarmUpSize, kWarmUpMs);
+
     std::cout << std::fixed << std::setprecision(3)
               << std::setw(7) << "N"
               << std::setw(7) << "M"
@@ -132,7 +190,9 @@ int main(int argc, char** argv) {
 
         std::vector<__fp16> A(A_size);
         std::vector<__fp16> B(B_size);
-        std::vector<float> reference(C_size);
+        // Both output buffers are value-initialised so that their pages are
+        // touched (page faults paid) outside the timed regions.
+        std::vector<float> reference(C_size, 0.0f);
         std::vector<float> result(C_size, std::numeric_limits<float>::quiet_NaN());
         // Paper inputs are FP16 row-major: generate FP32 in [-1,1], store FP16.
         for (__fp16& value : A) {
@@ -145,9 +205,21 @@ int main(int argc, char** argv) {
         const double baseline_ms = measure_ms([&] {
             baseline_gemm(A.data(), B.data(), reference.data(), N, M, K);
         });
-        const double optimized_ms = measure_ms([&] {
-            gemm_fp16(A.data(), B.data(), result.data(), N, M, K);
-        });
+
+        // Untimed warm-up for this very shape: its buffers, packing buffers and
+        // caches are different from the warm-up problem's, so touch them once
+        // before the measured repeats (the machine itself is already warm).
+        gemm_fp16(A.data(), B.data(), result.data(), N, M, K);
+
+        double optimized_ms_sum = 0;
+        const int repeat_time = 3;
+        for(std::size_t repeat = 0; repeat < repeat_time; ++repeat) {
+            optimized_ms_sum += measure_ms([&] {
+                gemm_fp16(A.data(), B.data(), result.data(), N, M, K);
+            });
+        }
+        double optimized_ms = optimized_ms_sum / repeat_time;
+
         const bool correct = matches(result, reference, 1.0e-4f, 1.0e-4f);
 
         // FP32 GEMM: 2*N*M*K floating-point operations.

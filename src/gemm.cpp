@@ -58,12 +58,23 @@ void pack_b_band(const __fp16* B, float* B_panel, std::size_t col0,
     }
 }
 
-// Scalar fallback for the edge tiles (mr<32 or nr<32), and for non-aarch64
-// builds where the SME asm kernel is not linked.
+// Scalar fallback for the edge tiles (mr<32 or nr<32), and for builds where
+// the SME asm kernel is missing or unusable (SVL != 512 bit).
+//
+// It has the same contract as the SME kernel: the mr x nr tile is
+// OVERWRITTEN, not accumulated into.  C may therefore hold garbage (gemm's
+// caller only promises the buffer exists) -- zeroing the tile first keeps the
+// two paths interchangeable.
 void scalar_microkernel(const float* A_panel, int lda,
                         const float* B_panel, int ldb,
                         float* C, int ldc,
                         int mr, int nr, int kc) {
+    for (int i = 0; i < mr; ++i) {
+        float* crow = C + static_cast<std::size_t>(i) * ldc;
+        for (int j = 0; j < nr; ++j) {
+            crow[j] = 0.0f;
+        }
+    }
     for (int k = 0; k < kc; ++k) {
         const float* ap = A_panel + static_cast<std::size_t>(k) * lda;
         const float* bp = B_panel + static_cast<std::size_t>(k) * ldb;
@@ -83,8 +94,11 @@ void scalar_microkernel(const float* A_panel, int lda,
 // C orchestrator: L2 column bands + row panels + k-major packing.
 //   A: N x M, B: M x K (FP16 inputs), C: N x K (FP32 output, row-major)
 //
-// The actual arithmetic of every full 32x32 tile is delegated to the SME
-// FMOPA micro-kernel in src/assemble.s (huohua_sme_microkernel_32x32).
+// The arithmetic of every full 32x32 tile is delegated to the SME FMOPA
+// micro-kernel in src/assemble.s (huohua_sme_microkernel_32x32); edge tiles
+// and machines with an unsupported vector length use scalar_microkernel.
+// Both paths overwrite their tile, so every element of C is written exactly
+// once here and C's incoming contents are irrelevant.
 // ---------------------------------------------------------------------------
 void gemm_fp16(const __fp16* A, const __fp16* B, float* C,
                std::size_t N, std::size_t M, std::size_t K) {
@@ -96,6 +110,13 @@ void gemm_fp16(const __fp16* A, const __fp16* B, float* C,
     const std::size_t lda = kTile;               // A panel width (rows per panel)
     const std::size_t ldb = Nc;                  // B band width (columns)
     const int ldc = static_cast<int>(K);
+
+#if defined(__aarch64__)
+    // The micro-kernel is hard-wired to a 512-bit streaming vector length
+    // (16 FP32 lanes per Z register).  Only take it when the hardware agrees,
+    // otherwise every tile goes through the portable scalar path.
+    const bool sme_ok = huohua_sme_svl_bytes() == 64u;
+#endif
 
     // Buffers: one A panel (kTile x M) + one B band (M x Nc).
     float* A_panel = static_cast<float*>(std::malloc(M * lda * sizeof(float)));
@@ -118,20 +139,15 @@ void gemm_fp16(const __fp16* A, const __fp16* B, float* C,
                 const std::size_t nr = (j0 + kTile <= ncols) ? kTile : (ncols - j0);
                 float* ctile = C + row0 * K + col0 + j0;
 
-                if (mr == kTile && nr == kTile) {
 #if defined(__aarch64__)
+                if (sme_ok && mr == kTile && nr == kTile) {
                     huohua_sme_microkernel_32x32(
                         A_panel, static_cast<int>(lda),
                         B_band + j0, static_cast<int>(ldb),
                         ctile, ldc, static_cast<int>(M));
-#else
-                    scalar_microkernel(A_panel, static_cast<int>(lda),
-                                        B_band + j0, static_cast<int>(ldb),
-                                        ctile, ldc,
-                                        static_cast<int>(mr), static_cast<int>(nr),
-                                        static_cast<int>(M));
+                } else
 #endif
-                } else {
+                {
                     scalar_microkernel(A_panel, static_cast<int>(lda),
                                        B_band + j0, static_cast<int>(ldb),
                                        ctile, ldc,

@@ -8,3 +8,4 @@ plan.md
 tmp/*
 !tmp/*.cpp
 !tmp/*.s
+!tmp/*.c
