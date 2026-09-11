@@ -1,6 +1,11 @@
 CXX ?= clang++
 CXXFLAGS ?= -std=c++17 -O3 -Wall -Wextra -Wpedantic -march=native
 
+NOBASELINE ?= 0
+ifeq ($(NOBASELINE),1)
+CXXFLAGS += -DNOBASELINE
+endif
+
 # assemble.s is the SME micro-kernel and must be built with the SME ISA.
 # C++ is kept without +sme so the compiler never auto-vectorizes scalar loops
 # into non-streaming SVE (which faults on Apple M4 outside streaming mode).
