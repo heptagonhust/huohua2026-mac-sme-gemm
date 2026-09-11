@@ -1,4 +1,5 @@
 build/
+logs/
 bench
 sme_fp16_technical_report(2).pdf
 pdf_extract.py

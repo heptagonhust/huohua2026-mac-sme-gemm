@@ -6,6 +6,11 @@ ifeq ($(NOBASELINE),1)
 CXXFLAGS += -DNOBASELINE
 endif
 
+DEBUG ?= 0
+ifeq ($(DEBUG),1)
+CXXFLAGS += -g
+endif
+
 # assemble.s is the SME micro-kernel and must be built with the SME ISA.
 # C++ is kept without +sme so the compiler never auto-vectorizes scalar loops
 # into non-streaming SVE (which faults on Apple M4 outside streaming mode).
