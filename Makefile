@@ -1,6 +1,11 @@
 CXX ?= clang++
 CXXFLAGS ?= -std=c++17 -O3 -Wall -Wextra -Wpedantic -march=native
 
+# The double-buffered RHS band pipeline runs a packing producer thread
+# (paper 4.5), so compiling and linking both need the thread runtime.
+CXXFLAGS += -pthread
+LDFLAGS += -pthread
+
 NOBASELINE ?= 0
 ifeq ($(NOBASELINE),1)
 CXXFLAGS += -DNOBASELINE
@@ -38,7 +43,7 @@ build/assemble.o: src/assemble.s $(HEADERS)
 	$(CXX) $(SME_ASM_FLAGS) -c $< -o $@
 
 $(TARGET): $(OBJ)
-	$(CXX) $(OBJ) -o $@
+	$(CXX) $(OBJ) $(LDFLAGS) -o $@
 
 run: $(TARGET)
 	$(TARGET) data/test.in
