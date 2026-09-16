@@ -47,14 +47,6 @@ bool allocate_size(std::size_t rows, std::size_t columns,
     return true;
 }
 
-template <typename Function>
-double measure_ms(Function function) {
-    const auto start = std::chrono::high_resolution_clock::now();
-    function();
-    const auto end = std::chrono::high_resolution_clock::now();
-    return std::chrono::duration<double, std::milli>(end - start).count();
-}
-
 bool matches(const std::vector<float>& actual,
              const std::vector<float>& expected,
              float absolute_tolerance,
@@ -112,11 +104,12 @@ int run_gemm(const std::size_t N, const std::size_t M, const std::size_t K,
 
     double baseline_ms;
     if(run_baseline){
-        baseline_ms = measure_ms([&] {
-            baseline_gemm(A.data(), B.data(), reference.data(), N, M, K);
-        });
+        const auto start = std::chrono::high_resolution_clock::now();
+        baseline_gemm(A.data(), B.data(), reference.data(), N, M, K);
+        const auto end = std::chrono::high_resolution_clock::now();
+        baseline_ms = std::chrono::duration<double, std::milli>(end - start).count();
     } else {
-        baseline_ms = 0,0;
+        baseline_ms = 0.0;
     }
     
     // Untimed warm-up for this very shape: its buffers, packing buffers and
@@ -127,9 +120,10 @@ int run_gemm(const std::size_t N, const std::size_t M, const std::size_t K,
     double optimized_ms_sum = 0;
     const int repeat_time = 3;
     for(std::size_t repeat = 0; repeat < repeat_time; ++repeat) {
-        optimized_ms_sum += measure_ms([&] {
-            gemm_fp16(A.data(), B.data(), result.data(), N, M, K);
-        });
+        const auto start = std::chrono::high_resolution_clock::now();
+        gemm_fp16(A.data(), B.data(), result.data(), N, M, K);
+        const auto end = std::chrono::high_resolution_clock::now();
+        optimized_ms_sum += std::chrono::duration<double, std::milli>(end - start).count();
     }
     double optimized_ms = optimized_ms_sum / repeat_time;
 
