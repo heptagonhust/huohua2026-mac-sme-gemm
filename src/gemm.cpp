@@ -62,7 +62,7 @@ std::size_t compute_nc(std::size_t N, std::size_t M, std::size_t K) {
         return K;
     }
     // Bytes of a single packed RHS column.
-    const std::size_t col_bytes = (M > 0 ? M : 1) * sizeof(float);
+    const std::size_t col_bytes = (M > 0 ? M : 1) * sizeof(C_TYPE);
     std::size_t cols = align_down(kL2Bytes / col_bytes, kTile);
     if (cols < kTile) {
         cols = kTile;
@@ -76,12 +76,12 @@ std::size_t compute_nc(std::size_t N, std::size_t M, std::size_t K) {
 // Pack one A row panel (mr rows x full inner M) into a k-major FP32 panel.
 // Input is FP16 (paper); values are widened to FP32 for the current kernel.
 // A_panel[k * lda + i] = (float)A[(row0 + i) * M + k], lda == kTile.
-void pack_a_panel(const __fp16* A, float* A_panel, std::size_t row0,
+void pack_a_panel(const A_TYPE* A, C_TYPE* A_panel, std::size_t row0,
                   std::size_t mr, std::size_t M, std::size_t lda) {
     for (std::size_t k = 0; k < M; ++k) {
         #pragma unroll(8)
         for (std::size_t i = 0; i < mr; ++i) {
-            A_panel[k * lda + i] = static_cast<float>(A[(row0 + i) * M + k]);
+            A_panel[k * lda + i] = static_cast<C_TYPE>(A[(row0 + i) * M + k]);
         }
     }
 }
@@ -92,14 +92,14 @@ void pack_a_panel(const __fp16* A, float* A_panel, std::size_t row0,
 // The body is deliberately unchanged (paper 4.2: packing primitives are
 // reused as-is); double buffering lives in the orchestrator below, which just
 // points this routine at one of two ping-pong slots.
-void pack_b_band(const __fp16* B, float* B_panel, std::size_t col0,
+void pack_b_band(const B_TYPE* B, C_TYPE* B_panel, std::size_t col0,
                  std::size_t ncols, std::size_t M, std::size_t K,
                  std::size_t ldb) {
     for (std::size_t k = 0; k < M; ++k) {
-        const __fp16* b_row = B + k * K + col0;
+        const B_TYPE* b_row = B + k * K + col0;
         #pragma unroll(8)
         for (std::size_t j = 0; j < ncols; ++j) {
-            B_panel[k * ldb + j] = static_cast<float>(b_row[j]);
+            B_panel[k * ldb + j] = static_cast<C_TYPE>(b_row[j]);
         }
     }
 }
@@ -116,8 +116,8 @@ void pack_b_band(const __fp16* B, float* B_panel, std::size_t col0,
 // avoid the per-call spawn, but that is a separate optimisation.
 class BandPacker {
 public:
-    BandPacker(const __fp16* B, std::size_t M, std::size_t K, std::size_t Nc,
-               std::size_t n_bands, float* slot0, float* slot1)
+    BandPacker(const B_TYPE* B, std::size_t M, std::size_t K, std::size_t Nc,
+               std::size_t n_bands, C_TYPE* slot0, C_TYPE* slot1)
         : B_(B), M_(M), K_(K), Nc_(Nc), n_bands_(n_bands) {
         slot_[0] = slot0;
         slot_[1] = slot1;
@@ -131,7 +131,7 @@ public:
     void start() { worker_ = std::thread([this] { run(); }); }
 
     // Blocks until band `band` is packed, then hands back its slot.
-    const float* acquire(std::size_t band) {
+    const C_TYPE* acquire(std::size_t band) {
         std::unique_lock<std::mutex> lock(mutex_);
         ready_.wait(lock, [&] { return produced_ > band; });
         return slot_[band & 1u];
@@ -182,12 +182,12 @@ private:
         }
     }
 
-    const __fp16* B_;
+    const B_TYPE* B_;
     std::size_t M_;
     std::size_t K_;
     std::size_t Nc_;
     std::size_t n_bands_;
-    float* slot_[2];
+    C_TYPE* slot_[2];
     std::thread worker_;
     std::mutex mutex_;
     std::condition_variable ready_;
@@ -203,22 +203,22 @@ private:
 // OVERWRITTEN, not accumulated into.  C may therefore hold garbage (gemm's
 // caller only promises the buffer exists) -- zeroing the tile first keeps the
 // two paths interchangeable.
-void scalar_microkernel(const float* A_panel, int lda,
-                        const float* B_panel, int ldb,
-                        float* C, int ldc,
+void scalar_microkernel(const C_TYPE* A_panel, int lda,
+                        const C_TYPE* B_panel, int ldb,
+                        C_TYPE* C, int ldc,
                         int mr, int nr, int kc) {
     for (int i = 0; i < mr; ++i) {
-        float* crow = C + static_cast<std::size_t>(i) * ldc;
+        C_TYPE* crow = C + static_cast<std::size_t>(i) * ldc;
         for (int j = 0; j < nr; ++j) {
             crow[j] = 0.0f;
         }
     }
     for (int k = 0; k < kc; ++k) {
-        const float* ap = A_panel + static_cast<std::size_t>(k) * lda;
-        const float* bp = B_panel + static_cast<std::size_t>(k) * ldb;
+        const C_TYPE* ap = A_panel + static_cast<std::size_t>(k) * lda;
+        const C_TYPE* bp = B_panel + static_cast<std::size_t>(k) * ldb;
         for (int i = 0; i < mr; ++i) {
-            const float a = ap[i];
-            float* crow = C + static_cast<std::size_t>(i) * ldc;
+            const C_TYPE a = ap[i];
+            C_TYPE* crow = C + static_cast<std::size_t>(i) * ldc;
             for (int j = 0; j < nr; ++j) {
                 crow[j] += a * bp[j];
             }
@@ -239,7 +239,7 @@ void scalar_microkernel(const float* A_panel, int lda,
 // Both paths overwrite their tile, so every element of C is written exactly
 // once here and C's incoming contents are irrelevant.
 // ---------------------------------------------------------------------------
-void gemm_fp16(const __fp16* A, const __fp16* B, float* C,
+void gemm_fp16(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
                std::size_t N, std::size_t M, std::size_t K) {
     if (N == 0 || M == 0 || K == 0) {
         return;
@@ -272,19 +272,19 @@ void gemm_fp16(const __fp16* A, const __fp16* B, float* C,
     // Buffers: one A panel (kTile x M) plus one or two B bands (M x Nc).
     const std::size_t band_elems = M * ldb;
     const std::size_t n_slots = overlap ? 2u : 1u;
-    float* A_panel = static_cast<float*>(std::malloc(M * lda * sizeof(float)));
-    float* band_mem = static_cast<float*>(
-        std::malloc(n_slots * band_elems * sizeof(float)));
+    C_TYPE* A_panel = static_cast<C_TYPE*>(std::malloc(M * lda * sizeof(C_TYPE)));
+    C_TYPE* band_mem = static_cast<C_TYPE*>(
+        std::malloc(n_slots * band_elems * sizeof(C_TYPE)));
     if (A_panel == nullptr || band_mem == nullptr) {
         std::free(A_panel);
         std::free(band_mem);
         return;
     }
-    float* slot[2] = {band_mem, overlap ? band_mem + band_elems : nullptr};
+    C_TYPE* slot[2] = {band_mem, overlap ? band_mem + band_elems : nullptr};
 
     // Consume one already-packed band: every A row panel against every 32-wide
     // slice of the band.  Shared by the overlapped and the synchronous paths.
-    auto compute_band = [&](const float* band, std::size_t col0,
+    auto compute_band = [&](const C_TYPE* band, std::size_t col0,
                             std::size_t ncols) {
         for (std::size_t row0 = 0; row0 < N; row0 += kTile) {
             const std::size_t mr = (row0 + kTile <= N) ? kTile : (N - row0);
@@ -292,7 +292,7 @@ void gemm_fp16(const __fp16* A, const __fp16* B, float* C,
 
             for (std::size_t j0 = 0; j0 < ncols; j0 += kTile) {
                 const std::size_t nr = (j0 + kTile <= ncols) ? kTile : (ncols - j0);
-                float* ctile = C + row0 * K + col0 + j0;
+                C_TYPE* ctile = C + row0 * K + col0 + j0;
 
 #if defined(__aarch64__)
                 if (sme_ok && mr == kTile && nr == kTile) {
@@ -322,7 +322,7 @@ void gemm_fp16(const __fp16* A, const __fp16* B, float* C,
         packer.start();
         for (std::size_t i = 0; i < n_bands; ++i) {
             const std::size_t col0 = i * Nc;
-            const float* band = packer.acquire(i);
+            const C_TYPE* band = packer.acquire(i);
             compute_band(band, col0, band_ncols(col0, Nc, K));
             packer.release(i);
         }

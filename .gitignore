@@ -10,3 +10,6 @@ tmp/*
 !tmp/*.cpp
 !tmp/*.s
 !tmp/*.c
+CLAUDE.md
+sme_fp16_technical_report.pdf
+bench_*_2_*

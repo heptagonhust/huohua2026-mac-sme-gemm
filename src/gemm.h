@@ -3,14 +3,24 @@
 
 #include <cstddef>
 
+#ifndef A_TYPE
+#define A_TYPE __fp16
+#endif
+#ifndef B_TYPE
+#define B_TYPE __fp16
+#endif
+#ifndef C_TYPE
+#define C_TYPE float
+#endif
+
 // Row-major matrices (FP16 inputs, FP32 accumulate & output, per paper):
 // A is N x M, B is M x K, C is N x K.
 // A[i * M + j], B[j * K + k], C[i * K + k].  Inputs are stored as __fp16.
-void baseline_gemm(const __fp16* A, const __fp16* B, float* C,
+void baseline_gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
                    std::size_t N, std::size_t M, std::size_t K);
 
 // Public entry point (FP16 input -> FP32 output, paper FP16->FP32 path).
-void gemm_fp16(const __fp16* A, const __fp16* B, float* C,
+void gemm_fp16(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
                std::size_t N, std::size_t M, std::size_t K);
 
 // ---------------------------------------------------------------------------
@@ -36,9 +46,9 @@ void gemm_fp16(const __fp16* A, const __fp16* B, float* C,
 #if defined(__cplusplus)
 extern "C" {
 #endif
-void huohua_sme_microkernel_32x32(const float* A_panel, int lda,
-                                  const float* B_panel, int ldb,
-                                  float* C, int ldc, int kc);
+void huohua_sme_microkernel_32x32(const C_TYPE* A_panel, int lda,
+                                  const C_TYPE* B_panel, int ldb,
+                                  C_TYPE* C, int ldc, int kc);
 
 // Streaming SVE vector length in bytes (RDSVL; requires FEAT_SME).  The
 // micro-kernel above is hard-wired to 64 bytes, so use this to decide whether

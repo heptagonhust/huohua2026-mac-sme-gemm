@@ -26,13 +26,12 @@ else
 SME_ASM_FLAGS :=
 endif
 
-TARGET := bench
+TARGET := bench_half_2_single
 OBJ := build/bench.o build/gemm.o build/assemble.o
 HEADERS := src/gemm.h src/assemble.s
 
-.PHONY: all run clean
-
-all: $(TARGET)
+bench_half_2_single: $(OBJ)
+	$(CXX) $(OBJ) $(LDFLAGS) -o $@ -DA_TYPE=__fp16 -DB_TYPE=__fp16 -DC_TYPE=float
 
 build/%.o: src/%.cpp $(HEADERS)
 	@mkdir -p build
@@ -42,11 +41,7 @@ build/assemble.o: src/assemble.s $(HEADERS)
 	@mkdir -p build
 	$(CXX) $(SME_ASM_FLAGS) -c $< -o $@
 
-$(TARGET): $(OBJ)
-	$(CXX) $(OBJ) $(LDFLAGS) -o $@
-
-run: $(TARGET)
-	$(TARGET) data/test.in
-
 clean:
-	rm -rf build bench
+	rm -rf build bench_*_2_*
+
+.PHONY: clean

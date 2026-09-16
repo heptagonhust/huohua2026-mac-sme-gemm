@@ -47,13 +47,13 @@ bool allocate_size(std::size_t rows, std::size_t columns,
     return true;
 }
 
-bool matches(const std::vector<float>& actual,
-             const std::vector<float>& expected,
-             float absolute_tolerance,
-             float relative_tolerance) {
+bool matches(const std::vector<C_TYPE>& actual,
+             const std::vector<C_TYPE>& expected,
+             C_TYPE absolute_tolerance,
+             C_TYPE relative_tolerance) {
     for (std::size_t index = 0; index < actual.size(); ++index) {
-        const float difference = std::fabs(actual[index] - expected[index]);
-        const float scale = std::max(1.0f, std::fabs(expected[index]));
+        const C_TYPE difference = std::fabs(actual[index] - expected[index]);
+        const C_TYPE scale = std::max(1.0f, std::fabs(expected[index]));
         if (difference > absolute_tolerance + relative_tolerance * scale) {
             return false;
         }
@@ -88,18 +88,18 @@ int run_gemm(const std::size_t N, const std::size_t M, const std::size_t K,
         return 1;
     }
 
-    std::vector<__fp16> A(A_size);
-    std::vector<__fp16> B(B_size);
+    std::vector<A_TYPE> A(A_size);
+    std::vector<B_TYPE> B(B_size);
     // Both output buffers are value-initialised so that their pages are
     // touched (page faults paid) outside the timed regions.
-    std::vector<float> reference(C_size, 0.0f);
-    std::vector<float> result(C_size, std::numeric_limits<float>::quiet_NaN());
+    std::vector<C_TYPE> reference(C_size, 0.0f);
+    std::vector<C_TYPE> result(C_size, std::numeric_limits<C_TYPE>::quiet_NaN());
     // Paper inputs are FP16 row-major: generate FP32 in [-1,1], store FP16.
-    for (__fp16& value : A) {
-        value = static_cast<__fp16>(distribution(generator));
+    for (A_TYPE& value : A) {
+        value = static_cast<A_TYPE>(distribution(generator));
     }
-    for (__fp16& value : B) {
-        value = static_cast<__fp16>(distribution(generator));
+    for (B_TYPE& value : B) {
+        value = static_cast<B_TYPE>(distribution(generator));
     }
 
     double baseline_ms;
@@ -171,14 +171,14 @@ void warm_up_machine(){
 
 }  // namespace
 
-void baseline_gemm(const __fp16* A, const __fp16* B, float* C,
+void baseline_gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
                    std::size_t N, std::size_t M, std::size_t K) {
     for (std::size_t i = 0; i < N; ++i) {
         for (std::size_t j = 0; j < K; ++j) {
-            float sum = 0.0f;
+            C_TYPE sum = 0.0f;
             for (std::size_t k = 0; k < M; ++k) {
-                const float a = static_cast<float>(A[i * M + k]);
-                const float b = static_cast<float>(B[k * K + j]);
+                const C_TYPE a = static_cast<C_TYPE>(A[i * M + k]);
+                const C_TYPE b = static_cast<C_TYPE>(B[k * K + j]);
                 sum += a * b;
             }
             C[i * K + j] = sum;
