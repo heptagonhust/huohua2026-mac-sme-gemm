@@ -8,8 +8,10 @@
 
 namespace {
 
-// One SME output micro-tile is 32 x 32 (four 16x16 ZA32 tiles).
-constexpr std::size_t kTile = 32;
+// One SME output micro-tile uses four ZA tiles: 32x32 for FP32 and 16x16
+// for FP64 at the 512-bit streaming vector length used by Apple M4.
+constexpr bool kUseFp64Kernel = std::is_same<C_TYPE, double>::value;
+constexpr std::size_t kTile = kUseFp64Kernel ? 16 : 32;
 // L2 budget for one RHS column band (paper formula 5).
 constexpr std::size_t kL2Bytes = 12u * 1024u * 1024u;
 
@@ -25,7 +27,7 @@ std::size_t band_ncols(std::size_t col0, std::size_t Nc, std::size_t K) {
     return (col0 + Nc <= K) ? Nc : (K - col0);
 }
 
-// Time to pack one band: read the configured input and write the FP32 panel.
+// Time to pack one band: read the configured input and write the packed panel.
 double est_pack_seconds(std::size_t M, std::size_t ncols) {
     constexpr double kBytesPerElement = sizeof(B_TYPE) + sizeof(C_TYPE);
     return static_cast<double>(M) * static_cast<double>(ncols) *
@@ -45,9 +47,9 @@ std::size_t align_down(std::size_t value, std::size_t alignment) {
 // Column-band width along the output-column dimension (paper formula 5).
 //
 // The RHS is M x K in this project's naming, so the banded side is K and the
-// inner (reused) side is M. One packed RHS column occupies M FP32 elements,
+// inner (reused) side is M. One packed RHS column occupies M C_TYPE elements,
 // regardless of the configured source type, so this returns the widest
-// 32-aligned band that still fits the L2 budget.
+// tile-aligned band that still fits the L2 budget.
 //
 // Wider is always better here: the number of bands sets how many times the
 // LHS panels are re-packed (n_bands * N * M elements) and how often the RHS
@@ -74,9 +76,9 @@ std::size_t compute_nc(std::size_t N, std::size_t M, std::size_t K) {
     return cols;
 }
 
-// Pack one A row panel (mr rows x full inner M) into a k-major FP32 panel.
-// The configured input type is converted to FP32 for the current kernel.
-// A_panel[k * lda + i] = (float)A[(row0 + i) * M + k], lda == kTile.
+// Pack one A row panel (mr rows x full inner M) into a k-major panel.
+// The configured input type is converted to the configured output type.
+// A_panel[k * lda + i] = (C_TYPE)A[(row0 + i) * M + k], lda == kTile.
 void pack_a_panel(const A_TYPE* A, C_TYPE* A_panel, std::size_t row0,
                   std::size_t mr, std::size_t M, std::size_t lda) {
     for (std::size_t k = 0; k < M; ++k) {
@@ -87,8 +89,8 @@ void pack_a_panel(const A_TYPE* A, C_TYPE* A_panel, std::size_t row0,
     }
 }
 
-// Pack one RHS column band (full inner M x ncols columns) into k-major FP32.
-// B_panel[k * ldb + j] = (float)B[k * K + (col0 + j)].
+// Pack one RHS column band into a k-major panel.
+// B_panel[k * ldb + j] = (C_TYPE)B[k * K + (col0 + j)].
 //
 // The body is deliberately unchanged (paper 4.2: packing primitives are
 // reused as-is); double buffering lives in the orchestrator below, which just
@@ -197,8 +199,7 @@ private:
     bool stopped_ = false;
 };
 
-// Scalar fallback for the edge tiles (mr<32 or nr<32), and for builds where
-// the SME asm kernel is missing or unusable (SVL != 512 bit).
+// Scalar fallback for edge tiles and for unsupported streaming vector length.
 //
 // It has the same contract as the SME kernel: the mr x nr tile is
 // OVERWRITTEN, not accumulated into.  C may therefore hold garbage (gemm's
@@ -231,14 +232,10 @@ void scalar_microkernel(const C_TYPE* A_panel, int lda,
 
 // ---------------------------------------------------------------------------
 // C orchestrator: L2 column bands + row panels + k-major packing, with the
-// RHS band double-buffered so that packing overlaps SME compute (paper 4.5).
-//   A: N x M, B: M x K (configured inputs), C: N x K (FP32 output, row-major)
-//
-// The arithmetic of every full 32x32 tile is delegated to the SME FMOPA
-// micro-kernel in src/assemble.s (huohua_sme_microkernel_32x32); edge tiles
+// RHS band double-buffered so that packing overlaps SME compute.
+// A: N x M, B: M x K, C: N x K using the configured precision.
+// Full tiles use the FP32 32x32 or FP64 16x16 SME micro-kernel; edge tiles
 // and machines with an unsupported vector length use scalar_microkernel.
-// Both paths overwrite their tile, so every element of C is written exactly
-// once here and C's incoming contents are irrelevant.
 // ---------------------------------------------------------------------------
 void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
                std::size_t N, std::size_t M, std::size_t K) {
@@ -253,9 +250,7 @@ void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
     const std::size_t n_bands = (K + Nc - 1) / Nc;
 
 #if defined(__aarch64__)
-    // The micro-kernel is hard-wired to a 512-bit streaming vector length
-    // (16 FP32 lanes per Z register).  Only take it when the hardware agrees,
-    // otherwise every tile goes through the portable scalar path.
+    // Both kernels are hard-wired to a 512-bit streaming vector length.
     const bool sme_ok = huohua_sme_svl_bytes() == 64u;
 #else
     const bool sme_ok = false;
@@ -283,8 +278,7 @@ void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
     }
     C_TYPE* slot[2] = {band_mem, overlap ? band_mem + band_elems : nullptr};
 
-    // Consume one already-packed band: every A row panel against every 32-wide
-    // slice of the band.  Shared by the overlapped and the synchronous paths.
+    // Consume one packed band: every A row panel against every tile-wide slice.
     auto compute_band = [&](const C_TYPE* band, std::size_t col0,
                             std::size_t ncols) {
         for (std::size_t row0 = 0; row0 < N; row0 += kTile) {
@@ -297,10 +291,17 @@ void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
 
 #if defined(__aarch64__)
                 if (sme_ok && mr == kTile && nr == kTile) {
-                    huohua_sme_microkernel_32x32(
+#if defined(HUOHUA_FP64)
+                    huohua_sme_microkernel_f64_16x16(
                         A_panel, static_cast<int>(lda),
                         band + j0, static_cast<int>(ldb),
                         ctile, ldc, static_cast<int>(M));
+#else
+                    huohua_sme_microkernel_f32_32x32(
+                        A_panel, static_cast<int>(lda),
+                        band + j0, static_cast<int>(ldb),
+                        ctile, ldc, static_cast<int>(M));
+#endif
                 } else
 #endif
                 {

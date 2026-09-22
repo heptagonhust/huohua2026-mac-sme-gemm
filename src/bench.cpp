@@ -53,7 +53,8 @@ bool matches(const std::vector<C_TYPE>& actual,
              C_TYPE relative_tolerance) {
     for (std::size_t index = 0; index < actual.size(); ++index) {
         const C_TYPE difference = std::fabs(actual[index] - expected[index]);
-        const C_TYPE scale = std::max(1.0f, std::fabs(expected[index]));
+        const C_TYPE scale = std::max(static_cast<C_TYPE>(1),
+                                      std::fabs(expected[index]));
         if (difference > absolute_tolerance + relative_tolerance * scale) {
             return false;
         }
@@ -73,7 +74,7 @@ bool matches(const std::vector<C_TYPE>& actual,
 // ---------------------------------------------------------------------------
 
 std::mt19937 generator(12345);
-std::uniform_real_distribution<float> distribution(-1.0f, 1.0f);
+std::uniform_real_distribution<double> distribution(-1.0, 1.0);
 int run_gemm(const std::size_t N, const std::size_t M, const std::size_t K,
              bool run_baseline = true, bool print_result = true) {
 
@@ -127,9 +128,14 @@ int run_gemm(const std::size_t N, const std::size_t M, const std::size_t K,
     }
     double optimized_ms = optimized_ms_sum / repeat_time;
 
-    const bool correct = run_baseline ? matches(result, reference, 1.0e-4f, 1.0e-4f) : true;
+    constexpr C_TYPE kTolerance = kDoubleToDouble
+        ? static_cast<C_TYPE>(1.0e-10)
+        : static_cast<C_TYPE>(1.0e-4);
+    const bool correct = run_baseline
+        ? matches(result, reference, kTolerance, kTolerance)
+        : true;
     
-    // FP32 GEMM: 2*N*M*K floating-point operations.
+    // GEMM performs 2*N*M*K floating-point operations.
     const double flops = 2.0 * static_cast<double>(N) *
     static_cast<double>(M) *
     static_cast<double>(K);
@@ -175,7 +181,7 @@ void baseline_gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
                    std::size_t N, std::size_t M, std::size_t K) {
     for (std::size_t i = 0; i < N; ++i) {
         for (std::size_t j = 0; j < K; ++j) {
-            C_TYPE sum = 0.0f;
+            C_TYPE sum = static_cast<C_TYPE>(0);
             for (std::size_t k = 0; k < M; ++k) {
                 const C_TYPE a = static_cast<C_TYPE>(A[i * M + k]);
                 const C_TYPE b = static_cast<C_TYPE>(B[k * K + j]);

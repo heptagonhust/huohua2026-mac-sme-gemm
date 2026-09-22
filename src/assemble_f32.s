@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// assemble.s -- SME FP32 32x32 micro-kernel (single SME worker / P-cluster).
+// assemble_f32.s -- SME FP32 32x32 micro-kernel (single SME worker / P-cluster).
 //
 // Computes one full 32x32 output tile that was already packed k-major:
 //   C(32x32 tile, row-major, leading dim ldc) = sum_k A_panel(k,:) (x) B_panel(k,:)
@@ -57,7 +57,7 @@
     .text
     .p2align 2
 
-// extern "C" void huohua_sme_microkernel_32x32(
+// extern "C" void huohua_sme_microkernel_f32_32x32(
 //     const float* A_panel,   // x0
 //     int lda,                // w1  (A panel row stride, in FP32)
 //     const float* B_panel,   // x2
@@ -65,8 +65,8 @@
 //     float* C,               // x4
 //     int ldc,                // w5  (C leading dim, in FP32)
 //     int kc);                // w6  (inner dimension count)
-    .globl _huohua_sme_microkernel_32x32
-_huohua_sme_microkernel_32x32:
+    .globl _huohua_sme_microkernel_f32_32x32
+_huohua_sme_microkernel_f32_32x32:
 
     // This kernel only implements the 512-bit/32-lane layout.  If the machine
     // has a different streaming vector length, bail out and leave C untouched

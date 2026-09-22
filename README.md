@@ -25,7 +25,8 @@ huohua/
 ├── src/
 │   ├── gemm.h                     # 公共声明（gemm_fp16 / baseline_gemm / SME asm 入口）
 │   ├── gemm.cpp                   # 主体函数部分
-│   ├── assemble.s                 # SME FP32 32x32 微内核
+│   ├── assemble_f32.s             # SME FP32 32x32 微内核
+│   ├── assemble_f64.s             # SME FP64 16x16 微内核
 │   └── bench.cpp                  # main：baseline 对比 + 正确性校验
 └── tmp/                           # 临时文件，包含跟踪 SME 探针源码（*.cpp / *.s）
 ```
@@ -38,7 +39,7 @@ huohua/
 
 实现要点：
 
-- **SME 汇编微内核**（`src/assemble.s`）：4 个 ZA32 16×16 tile 以 2×2 覆盖 32×32 输出块，
+- **SME 汇编微内核**（`src/assemble_f32.s`）：4 个 ZA32 16×16 tile 以 2×2 覆盖 32×32 输出块，
   K 循环每步发 4 条 `fmopa` 外积累加；整个 tile 只进出一次 streaming mode
   （`SMSTART/SMSTOP`，摊薄 ~9ns 切换），最后用 `mov z.s, p0/m, zaNh.s[w12, 0]` 逐行读回 ZA 写 C。
 - **Apple 汇编器 SME 语法适配**：实测发现其 `mova`/FP16 加宽助记符支持残缺，开发中以
@@ -82,7 +83,7 @@ huohua/
 - 状态：❌ 未做
 - 目标：内核从 FP32 FMOPA 切到 FP16 加宽 `fmopa za0.s, ..., zN.h, zM.h`，一条指令覆盖相邻 2 个 k
   （kr=2、lane pair），算力密度 2×（512→1024 FLOP/条）。
-- 改动面：`src/assemble.s`（K 步进、`ld1h` 装载）+ `gemm.cpp` 打包布局（k 交错）
+- 改动面：`src/assemble_f32.s`（K 步进、`ld1h` 装载）+ `gemm.cpp` 打包布局（k 交错）
 - 验证口径：单 cluster 峰值应翻倍趋近 ~2009 GFLOP/s；正确性保持全绿。
 - 备注：FP16 加宽 lane 映射已在本机探针确认（`ZA[i][j] ← A_h[2i]·B_h[2j]`）。
 
@@ -90,14 +91,14 @@ huohua/
 
 - 状态：❌ 未做
 - 目标：K 循环内提前装载下一组 A/B、多 ZA tile 轮转，隐藏 load 延迟，把利用率从 ~24% 拉向峰值。
-- 改动面：`src/assemble.s`（内层 K 循环展开/流水）
+- 改动面：`src/assemble_f32.s`（内层 K 循环展开/流水）
 - 验证口径：compute-bound shape 利用率显著上升；正确性保持全绿。
 
 ### 优化点 4：L2 定向 prefetch（`pldl2keep`）
 
 - 状态：❌ 未做
 - 目标：只对冷流 RHS 做 L2 预取（`locality=2`、前瞻若干向量），decode / 大 K shape 收益。
-- 改动面：`src/assemble.s` 或编排层预取；LHS 跨 N 复用不预取。
+- 改动面：`src/assemble_f32.s` 或编排层预取；LHS 跨 N 复用不预取。
 
 ### 优化点 5：并行 / 重叠 packing
 
@@ -133,18 +134,21 @@ huohua/
 
 ## 构建与运行
 
-项目提供两种独立精度构建；两者使用各自的对象目录，类型宏在 C++ 编译阶段传入，避免不同精度错误复用对象：
+项目提供三种独立精度构建；三者使用各自的对象目录，类型宏在 C++ 编译阶段传入，避免不同精度错误复用对象：
 
 ```bash
-make                          # 同时构建以下两个可执行文件
+make                          # 同时构建以下三个可执行文件
 make bench_half_2_single      # FP16 × FP16 → FP32
 make bench_single_2_single    # FP32 × FP32 → FP32
+make bench_double_2_double    # FP64 × FP64 → FP64
 
 ./bench_half_2_single [file]  # 可传入自定义 "N M K" 列表文件
 ./bench_single_2_single [file]
+./bench_double_2_double [file]
 
 make run_half_2_single        # 使用 data/test.in
 make run_single_2_single      # 使用 data/test.in
+make run_double_2_double      # 使用 data/test.in
 ```
 
-两种路径的原始输入存储类型不同，但都会在 packing 阶段生成 FP32 k-major 面板，并共享 `src/assemble.s` 中的 FP32 SME `fmopa` 微内核；累加与输出均为 FP32。汇编文件使用 `-march=armv9-a+sme2` 编译，C++ 使用 `-march=native`。
+FP16 与 FP32 输入路径都会在 packing 阶段生成 FP32 k-major 面板，并共享 `src/assemble_f32.s` 中的 FP32 32×32 SME 微内核。FP64 路径生成 FP64 k-major 面板，并使用 `src/assemble_f64.s` 中独立的 FP64 16×16 SME 微内核。FP32 内核使用 `-march=armv9-a+sme2`，FP64 内核额外使用 `+sme-f64f64`；C++ 使用 `-march=native`。
