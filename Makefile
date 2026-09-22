@@ -1,8 +1,8 @@
 CXX ?= clang++
 CXXFLAGS ?= -std=c++17 -O3 -Wall -Wextra -Wpedantic -march=native
 
-# The double-buffered RHS band pipeline runs a packing producer thread
-# (paper 4.5), so compiling and linking both need the thread runtime.
+# The double-buffered RHS band pipeline runs a packing producer thread,
+# so compiling and linking both need the thread runtime.
 CXXFLAGS += -pthread
 LDFLAGS += -pthread
 
@@ -26,22 +26,50 @@ else
 SME_ASM_FLAGS :=
 endif
 
-TARGET := bench_half_2_single
-OBJ := build/bench.o build/gemm.o build/assemble.o
 HEADERS := src/gemm.h src/assemble.s
+HALF_FLAGS := -DA_TYPE=__fp16 -DB_TYPE=__fp16 -DC_TYPE=float \
+              -DPRECISION_NAME='"FP16 x FP16 -> FP32"'
+SINGLE_FLAGS := -DA_TYPE=float -DB_TYPE=float -DC_TYPE=float \
+                -DPRECISION_NAME='"FP32 x FP32 -> FP32"'
 
-bench_half_2_single: $(OBJ)
-	$(CXX) $(OBJ) $(LDFLAGS) -o $@ -DA_TYPE=__fp16 -DB_TYPE=__fp16 -DC_TYPE=float
+HALF_OBJ := build/half_2_single/bench.o \
+            build/half_2_single/gemm.o \
+            build/half_2_single/assemble.o
+SINGLE_OBJ := build/single_2_single/bench.o \
+              build/single_2_single/gemm.o \
+              build/single_2_single/assemble.o
 
-build/%.o: src/%.cpp $(HEADERS)
-	@mkdir -p build
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+.PHONY: all clean run_half_2_single run_single_2_single
 
-build/assemble.o: src/assemble.s $(HEADERS)
-	@mkdir -p build
+all: bench_half_2_single bench_single_2_single
+
+bench_half_2_single: $(HALF_OBJ)
+	$(CXX) $(HALF_OBJ) $(LDFLAGS) -o $@
+
+bench_single_2_single: $(SINGLE_OBJ)
+	$(CXX) $(SINGLE_OBJ) $(LDFLAGS) -o $@
+
+build/half_2_single/%.o: src/%.cpp $(HEADERS)
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(HALF_FLAGS) -c $< -o $@
+
+build/single_2_single/%.o: src/%.cpp $(HEADERS)
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(SINGLE_FLAGS) -c $< -o $@
+
+build/half_2_single/assemble.o: src/assemble.s $(HEADERS)
+	@mkdir -p $(@D)
 	$(CXX) $(SME_ASM_FLAGS) -c $< -o $@
 
-clean:
-	rm -rf build bench_*_2_*
+build/single_2_single/assemble.o: src/assemble.s $(HEADERS)
+	@mkdir -p $(@D)
+	$(CXX) $(SME_ASM_FLAGS) -c $< -o $@
 
-.PHONY: clean
+run_half_2_single: bench_half_2_single
+	./bench_half_2_single data/test.in
+
+run_single_2_single: bench_single_2_single
+	./bench_single_2_single data/test.in
+
+clean:
+	rm -rf build bench_half_2_single bench_single_2_single

@@ -25,10 +25,11 @@ std::size_t band_ncols(std::size_t col0, std::size_t Nc, std::size_t K) {
     return (col0 + Nc <= K) ? Nc : (K - col0);
 }
 
-// Time to pack one band: each element reads 2 B (FP16) and writes 4 B (FP32).
+// Time to pack one band: read the configured input and write the FP32 panel.
 double est_pack_seconds(std::size_t M, std::size_t ncols) {
-    return static_cast<double>(M) * static_cast<double>(ncols) * 6.0 /
-           kPackBytesPerSecond;
+    constexpr double kBytesPerElement = sizeof(B_TYPE) + sizeof(C_TYPE);
+    return static_cast<double>(M) * static_cast<double>(ncols) *
+           kBytesPerElement / kPackBytesPerSecond;
 }
 
 // Time for the matrix engines to consume one band: 2*N*M*ncols FLOP.
@@ -44,8 +45,8 @@ std::size_t align_down(std::size_t value, std::size_t alignment) {
 // Column-band width along the output-column dimension (paper formula 5).
 //
 // The RHS is M x K in this project's naming, so the banded side is K and the
-// inner (reused) side is M.  One packed RHS column occupies M FP32 elements
-// (the FP16 inputs are widened during packing), so this returns the widest
+// inner (reused) side is M. One packed RHS column occupies M FP32 elements,
+// regardless of the configured source type, so this returns the widest
 // 32-aligned band that still fits the L2 budget.
 //
 // Wider is always better here: the number of bands sets how many times the
@@ -74,7 +75,7 @@ std::size_t compute_nc(std::size_t N, std::size_t M, std::size_t K) {
 }
 
 // Pack one A row panel (mr rows x full inner M) into a k-major FP32 panel.
-// Input is FP16 (paper); values are widened to FP32 for the current kernel.
+// The configured input type is converted to FP32 for the current kernel.
 // A_panel[k * lda + i] = (float)A[(row0 + i) * M + k], lda == kTile.
 void pack_a_panel(const A_TYPE* A, C_TYPE* A_panel, std::size_t row0,
                   std::size_t mr, std::size_t M, std::size_t lda) {
@@ -112,7 +113,7 @@ void pack_b_band(const B_TYPE* B, C_TYPE* B_panel, std::size_t col0,
 // once band i-2 has been released (band <= consumed_ + 1): that is exactly the
 // guarantee that it never overwrites the slot being read.
 //
-// The lifetime is one gemm_fp16 call.  A resident worker (paper 4.4) would
+// The lifetime is one gemm call. A resident worker (paper 4.4) would
 // avoid the per-call spawn, but that is a separate optimisation.
 class BandPacker {
 public:
@@ -231,7 +232,7 @@ void scalar_microkernel(const C_TYPE* A_panel, int lda,
 // ---------------------------------------------------------------------------
 // C orchestrator: L2 column bands + row panels + k-major packing, with the
 // RHS band double-buffered so that packing overlaps SME compute (paper 4.5).
-//   A: N x M, B: M x K (FP16 inputs), C: N x K (FP32 output, row-major)
+//   A: N x M, B: M x K (configured inputs), C: N x K (FP32 output, row-major)
 //
 // The arithmetic of every full 32x32 tile is delegated to the SME FMOPA
 // micro-kernel in src/assemble.s (huohua_sme_microkernel_32x32); edge tiles
@@ -239,7 +240,7 @@ void scalar_microkernel(const C_TYPE* A_panel, int lda,
 // Both paths overwrite their tile, so every element of C is written exactly
 // once here and C's incoming contents are irrelevant.
 // ---------------------------------------------------------------------------
-void gemm_fp16(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
+void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
                std::size_t N, std::size_t M, std::size_t K) {
     if (N == 0 || M == 0 || K == 0) {
         return;
@@ -337,4 +338,9 @@ void gemm_fp16(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
 
     std::free(A_panel);
     std::free(band_mem);
+}
+
+void gemm_fp16(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
+               std::size_t N, std::size_t M, std::size_t K) {
+    gemm(A, B, C, N, M, K);
 }

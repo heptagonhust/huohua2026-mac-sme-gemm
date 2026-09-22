@@ -94,7 +94,7 @@ int run_gemm(const std::size_t N, const std::size_t M, const std::size_t K,
     // touched (page faults paid) outside the timed regions.
     std::vector<C_TYPE> reference(C_size, 0.0f);
     std::vector<C_TYPE> result(C_size, std::numeric_limits<C_TYPE>::quiet_NaN());
-    // Paper inputs are FP16 row-major: generate FP32 in [-1,1], store FP16.
+    // Generate FP32 values in [-1,1], then store them in the configured type.
     for (A_TYPE& value : A) {
         value = static_cast<A_TYPE>(distribution(generator));
     }
@@ -115,13 +115,13 @@ int run_gemm(const std::size_t N, const std::size_t M, const std::size_t K,
     // Untimed warm-up for this very shape: its buffers, packing buffers and
     // caches are different from the warm-up problem's, so touch them once
     // before the measured repeats (the machine itself is already warm).
-    gemm_fp16(A.data(), B.data(), result.data(), N, M, K);
+    gemm(A.data(), B.data(), result.data(), N, M, K);
     
     double optimized_ms_sum = 0;
     const int repeat_time = 3;
     for(std::size_t repeat = 0; repeat < repeat_time; ++repeat) {
         const auto start = std::chrono::high_resolution_clock::now();
-        gemm_fp16(A.data(), B.data(), result.data(), N, M, K);
+        gemm(A.data(), B.data(), result.data(), N, M, K);
         const auto end = std::chrono::high_resolution_clock::now();
         optimized_ms_sum += std::chrono::duration<double, std::milli>(end - start).count();
     }
@@ -200,6 +200,7 @@ int main(int argc, char** argv) {
     // systematically slower than the later ones.
     warm_up_machine();
 
+    std::cout << "precision: " << PRECISION_NAME << '\n';
     std::cout << std::fixed << std::setprecision(3)
               << std::setw(7) << "N"
               << std::setw(7) << "M"

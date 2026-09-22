@@ -133,8 +133,18 @@ huohua/
 
 ## 构建与运行
 
+项目提供两种独立精度构建；两者使用各自的对象目录，类型宏在 C++ 编译阶段传入，避免不同精度错误复用对象：
+
 ```bash
-make          # 构建 bench（assemble.s 以 -march=armv9-a+sme2 编译，C++ 以 -march=native）
-make run      # 等价于 ./bench data/test.in
-./bench [file] # 默认 data/test.in，可传入自定义 "N M K" 列表文件
+make                          # 同时构建以下两个可执行文件
+make bench_half_2_single      # FP16 × FP16 → FP32
+make bench_single_2_single    # FP32 × FP32 → FP32
+
+./bench_half_2_single [file]  # 可传入自定义 "N M K" 列表文件
+./bench_single_2_single [file]
+
+make run_half_2_single        # 使用 data/test.in
+make run_single_2_single      # 使用 data/test.in
 ```
+
+两种路径的原始输入存储类型不同，但都会在 packing 阶段生成 FP32 k-major 面板，并共享 `src/assemble.s` 中的 FP32 SME `fmopa` 微内核；累加与输出均为 FP32。汇编文件使用 `-march=armv9-a+sme2` 编译，C++ 使用 `-march=native`。

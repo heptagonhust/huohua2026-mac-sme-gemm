@@ -2,6 +2,7 @@
 #define HUOHUA_GEMM_H
 
 #include <cstddef>
+#include <type_traits>
 
 #ifndef A_TYPE
 #define A_TYPE __fp16
@@ -12,14 +13,30 @@
 #ifndef C_TYPE
 #define C_TYPE float
 #endif
+#ifndef PRECISION_NAME
+#define PRECISION_NAME "FP16 x FP16 -> FP32"
+#endif
 
-// Row-major matrices (FP16 inputs, FP32 accumulate & output, per paper):
+static_assert(std::is_same<A_TYPE, __fp16>::value ||
+              std::is_same<A_TYPE, float>::value,
+              "A_TYPE must be __fp16 or float");
+static_assert(std::is_same<B_TYPE, __fp16>::value ||
+              std::is_same<B_TYPE, float>::value,
+              "B_TYPE must be __fp16 or float");
+static_assert(std::is_same<C_TYPE, float>::value,
+              "The current SME kernel requires C_TYPE=float");
+
+// Row-major matrices using the configured input types and FP32 output:
 // A is N x M, B is M x K, C is N x K.
-// A[i * M + j], B[j * K + k], C[i * K + k].  Inputs are stored as __fp16.
+// A[i * M + j], B[j * K + k], C[i * K + k].
 void baseline_gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
                    std::size_t N, std::size_t M, std::size_t K);
 
-// Public entry point (FP16 input -> FP32 output, paper FP16->FP32 path).
+// Public entry point for the configured input types and FP32 output.
+void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
+          std::size_t N, std::size_t M, std::size_t K);
+
+// Compatibility entry point retained for existing callers.
 void gemm_fp16(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
                std::size_t N, std::size_t M, std::size_t K);
 
@@ -27,8 +44,7 @@ void gemm_fp16(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
 // SME micro-kernel (assembly, see src/assemble.s).
 //
 // Computes -- and OVERWRITES, it does not accumulate -- one full 32x32 output
-// tile.  The C orchestrator packs FP16 inputs into FP32 k-major panels before
-// calling this kernel:
+// tile. The orchestrator packs the configured inputs into FP32 k-major panels:
 //   C(32x32 within leading dim ldc) = sum_k A_panel(k,:)*B_panel(k,:)
 //
 //   A_panel: element (k, i) at A_panel[k*lda + i], i in [0, 32)
@@ -50,9 +66,8 @@ void huohua_sme_microkernel_32x32(const C_TYPE* A_panel, int lda,
                                   const C_TYPE* B_panel, int ldb,
                                   C_TYPE* C, int ldc, int kc);
 
-// Streaming SVE vector length in bytes (RDSVL; requires FEAT_SME).  The
-// micro-kernel above is hard-wired to 64 bytes, so use this to decide whether
-// it may be used at all.
+// Streaming SVE vector length in bytes (RDSVL; requires FEAT_SME). The
+// micro-kernel above is hard-wired to 64 bytes, so use this to select fallback.
 unsigned huohua_sme_svl_bytes(void);
 #if defined(__cplusplus)
 }
