@@ -52,6 +52,10 @@ bool matches(const std::vector<C_TYPE>& actual,
              C_TYPE absolute_tolerance,
              C_TYPE relative_tolerance) {
     for (std::size_t index = 0; index < actual.size(); ++index) {
+        if (!std::isfinite(actual[index]) ||
+            !std::isfinite(expected[index])) {
+            return false;
+        }
         const C_TYPE difference = std::fabs(actual[index] - expected[index]);
         const C_TYPE scale = std::max(static_cast<C_TYPE>(1),
                                       std::fabs(expected[index]));
@@ -97,10 +101,12 @@ int run_gemm(const std::size_t N, const std::size_t M, const std::size_t K,
     std::vector<C_TYPE> result(C_size, std::numeric_limits<C_TYPE>::quiet_NaN());
     // Generate FP32 values in [-1,1], then store them in the configured type.
     for (A_TYPE& value : A) {
-        value = static_cast<A_TYPE>(distribution(generator));
+        value = static_cast<A_TYPE>(
+            static_cast<float>(distribution(generator)));
     }
     for (B_TYPE& value : B) {
-        value = static_cast<B_TYPE>(distribution(generator));
+        value = static_cast<B_TYPE>(
+            static_cast<float>(distribution(generator)));
     }
 
     double baseline_ms;

@@ -21,6 +21,10 @@ constexpr bool kHalfToSingle =
     std::is_same<A_TYPE, __fp16>::value &&
     std::is_same<B_TYPE, __fp16>::value &&
     std::is_same<C_TYPE, float>::value;
+constexpr bool kBfloatToSingle =
+    std::is_same<A_TYPE, __bf16>::value &&
+    std::is_same<B_TYPE, __bf16>::value &&
+    std::is_same<C_TYPE, float>::value;
 constexpr bool kSingleToSingle =
     std::is_same<A_TYPE, float>::value &&
     std::is_same<B_TYPE, float>::value &&
@@ -29,7 +33,8 @@ constexpr bool kDoubleToDouble =
     std::is_same<A_TYPE, double>::value &&
     std::is_same<B_TYPE, double>::value &&
     std::is_same<C_TYPE, double>::value;
-static_assert(kHalfToSingle || kSingleToSingle || kDoubleToDouble,
+static_assert(kHalfToSingle || kBfloatToSingle || kSingleToSingle ||
+              kDoubleToDouble,
               "Unsupported GEMM precision combination");
 
 // Row-major matrices using the configured input and output types:
