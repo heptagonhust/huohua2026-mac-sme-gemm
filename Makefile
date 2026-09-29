@@ -26,13 +26,15 @@ SME_F64_FLAGS :=
 endif
 
 HEADERS := src/gemm.h
-ASM_SOURCES := src/assemble_f32.s src/assemble_f64.s
+ASM_SOURCES := src/assemble_f32.s src/assemble_f64.s src/assemble_i8.s
 HALF_FLAGS := -DA_TYPE=__fp16 -DB_TYPE=__fp16 -DC_TYPE=float \
               -DPRECISION_NAME='"FP16 x FP16 -> FP32"'
 BFLOAT_FLAGS := -DA_TYPE=__bf16 -DB_TYPE=__bf16 -DC_TYPE=float \
                 -DPRECISION_NAME='"BF16 x BF16 -> FP32"'
 SINGLE_FLAGS := -DA_TYPE=float -DB_TYPE=float -DC_TYPE=float \
                 -DPRECISION_NAME='"FP32 x FP32 -> FP32"'
+INT8_FLAGS := -DA_TYPE=int8_t -DB_TYPE=int8_t -DC_TYPE=int32_t \
+              -DHUOHUA_INT8 -DPRECISION_NAME='"INT8 x INT8 -> INT32"'
 DOUBLE_FLAGS := -DA_TYPE=double -DB_TYPE=double -DC_TYPE=double -DHUOHUA_FP64 \
                 -DPRECISION_NAME='"FP64 x FP64 -> FP64"'
 
@@ -45,16 +47,20 @@ BFLOAT_OBJ := build/bfloat_2_single/bench.o \
 SINGLE_OBJ := build/single_2_single/bench.o \
               build/single_2_single/gemm.o \
               build/single_2_single/assemble_f32.o
+INT8_OBJ := build/int8_2_int32/bench.o \
+            build/int8_2_int32/gemm.o \
+            build/int8_2_int32/assemble_f32.o \
+            build/int8_2_int32/assemble_i8.o
 DOUBLE_OBJ := build/double_2_double/bench.o \
               build/double_2_double/gemm.o \
               build/double_2_double/assemble_f32.o \
               build/double_2_double/assemble_f64.o
 
 .PHONY: all clean run_half_2_single run_bfloat_2_single \
-        run_single_2_single run_double_2_double
+        run_single_2_single run_int8_2_int32 run_double_2_double
 
 all: bench_half_2_single bench_bfloat_2_single bench_single_2_single \
-     bench_double_2_double
+     bench_int8_2_int32 bench_double_2_double
 
 bench_half_2_single: $(HALF_OBJ)
 	$(CXX) $(HALF_OBJ) $(LDFLAGS) -o $@
@@ -64,6 +70,9 @@ bench_bfloat_2_single: $(BFLOAT_OBJ)
 
 bench_single_2_single: $(SINGLE_OBJ)
 	$(CXX) $(SINGLE_OBJ) $(LDFLAGS) -o $@
+
+bench_int8_2_int32: $(INT8_OBJ)
+	$(CXX) $(INT8_OBJ) $(LDFLAGS) -o $@
 
 bench_double_2_double: $(DOUBLE_OBJ)
 	$(CXX) $(DOUBLE_OBJ) $(LDFLAGS) -o $@
@@ -80,6 +89,10 @@ build/single_2_single/%.o: src/%.cpp $(HEADERS) $(ASM_SOURCES)
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) $(SINGLE_FLAGS) -c $< -o $@
 
+build/int8_2_int32/%.o: src/%.cpp $(HEADERS) $(ASM_SOURCES)
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(INT8_FLAGS) -c $< -o $@
+
 build/double_2_double/%.o: src/%.cpp $(HEADERS) $(ASM_SOURCES)
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) $(DOUBLE_FLAGS) -c $< -o $@
@@ -93,6 +106,14 @@ build/bfloat_2_single/assemble_f32.o: src/assemble_f32.s
 	$(CXX) $(SME_F32_FLAGS) -c $< -o $@
 
 build/single_2_single/assemble_f32.o: src/assemble_f32.s
+	@mkdir -p $(@D)
+	$(CXX) $(SME_F32_FLAGS) -c $< -o $@
+
+build/int8_2_int32/assemble_f32.o: src/assemble_f32.s
+	@mkdir -p $(@D)
+	$(CXX) $(SME_F32_FLAGS) -c $< -o $@
+
+build/int8_2_int32/assemble_i8.o: src/assemble_i8.s
 	@mkdir -p $(@D)
 	$(CXX) $(SME_F32_FLAGS) -c $< -o $@
 
@@ -113,9 +134,12 @@ run_bfloat_2_single: bench_bfloat_2_single
 run_single_2_single: bench_single_2_single
 	./bench_single_2_single data/test.in
 
+run_int8_2_int32: bench_int8_2_int32
+	./bench_int8_2_int32 data/test.in
+
 run_double_2_double: bench_double_2_double
 	./bench_double_2_double data/test.in
 
 clean:
 	rm -rf build bench_half_2_single bench_bfloat_2_single \
-	       bench_single_2_single bench_double_2_double
+	       bench_single_2_single bench_int8_2_int32 bench_double_2_double

@@ -2,6 +2,7 @@
 #define HUOHUA_GEMM_H
 
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
 
 #ifndef A_TYPE
@@ -29,12 +30,16 @@ constexpr bool kSingleToSingle =
     std::is_same<A_TYPE, float>::value &&
     std::is_same<B_TYPE, float>::value &&
     std::is_same<C_TYPE, float>::value;
+constexpr bool kInt8ToInt32 =
+    std::is_same<A_TYPE, int8_t>::value &&
+    std::is_same<B_TYPE, int8_t>::value &&
+    std::is_same<C_TYPE, int32_t>::value;
 constexpr bool kDoubleToDouble =
     std::is_same<A_TYPE, double>::value &&
     std::is_same<B_TYPE, double>::value &&
     std::is_same<C_TYPE, double>::value;
 static_assert(kHalfToSingle || kBfloatToSingle || kSingleToSingle ||
-              kDoubleToDouble,
+              kInt8ToInt32 || kDoubleToDouble,
               "Unsupported GEMM precision combination");
 
 // Row-major matrices using the configured input and output types:
@@ -57,6 +62,11 @@ extern "C" {
 void huohua_sme_microkernel_f32_32x32(const float* A_panel, int lda,
                                       const float* B_panel, int ldb,
                                       float* C, int ldc, int kc);
+
+// Signed INT8 packed groups (kr=4), four ZA32 tiles, 32x32 output tile.
+void huohua_sme_microkernel_i8_32x32(const int8_t* A_panel, int lda,
+                                     const int8_t* B_panel, int ldb,
+                                     int32_t* C, int ldc, int kc_groups);
 
 // FP64 packed panels, four ZA64 tiles, 16x16 output tile.
 void huohua_sme_microkernel_f64_16x16(const double* A_panel, int lda,

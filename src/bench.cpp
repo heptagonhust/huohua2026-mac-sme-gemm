@@ -9,6 +9,7 @@
 #include <limits>
 #include <random>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -52,13 +53,18 @@ bool matches(const std::vector<C_TYPE>& actual,
              C_TYPE absolute_tolerance,
              C_TYPE relative_tolerance) {
     for (std::size_t index = 0; index < actual.size(); ++index) {
-        if (!std::isfinite(actual[index]) ||
-            !std::isfinite(expected[index])) {
-            return false;
+        if constexpr (std::is_floating_point<C_TYPE>::value) {
+            if (!std::isfinite(actual[index]) ||
+                !std::isfinite(expected[index])) {
+                return false;
+            }
         }
-        const C_TYPE difference = std::fabs(actual[index] - expected[index]);
-        const C_TYPE scale = std::max(static_cast<C_TYPE>(1),
-                                      std::fabs(expected[index]));
+        const C_TYPE difference = actual[index] > expected[index]
+            ? actual[index] - expected[index]
+            : expected[index] - actual[index];
+        const C_TYPE magnitude = expected[index] < 0
+            ? -expected[index] : expected[index];
+        const C_TYPE scale = std::max(static_cast<C_TYPE>(1), magnitude);
         if (difference > absolute_tolerance + relative_tolerance * scale) {
             return false;
         }
@@ -79,6 +85,7 @@ bool matches(const std::vector<C_TYPE>& actual,
 
 std::mt19937 generator(12345);
 std::uniform_real_distribution<double> distribution(-1.0, 1.0);
+std::uniform_int_distribution<int> integer_distribution(-8, 8);
 int run_gemm(const std::size_t N, const std::size_t M, const std::size_t K,
              bool run_baseline = true, bool print_result = true) {
 
@@ -101,12 +108,20 @@ int run_gemm(const std::size_t N, const std::size_t M, const std::size_t K,
     std::vector<C_TYPE> result(C_size, std::numeric_limits<C_TYPE>::quiet_NaN());
     // Generate FP32 values in [-1,1], then store them in the configured type.
     for (A_TYPE& value : A) {
-        value = static_cast<A_TYPE>(
-            static_cast<float>(distribution(generator)));
+        if constexpr (kInt8ToInt32) {
+            value = static_cast<A_TYPE>(integer_distribution(generator));
+        } else {
+            value = static_cast<A_TYPE>(
+                static_cast<float>(distribution(generator)));
+        }
     }
     for (B_TYPE& value : B) {
-        value = static_cast<B_TYPE>(
-            static_cast<float>(distribution(generator)));
+        if constexpr (kInt8ToInt32) {
+            value = static_cast<B_TYPE>(integer_distribution(generator));
+        } else {
+            value = static_cast<B_TYPE>(
+                static_cast<float>(distribution(generator)));
+        }
     }
 
     double baseline_ms;
@@ -134,9 +149,10 @@ int run_gemm(const std::size_t N, const std::size_t M, const std::size_t K,
     }
     double optimized_ms = optimized_ms_sum / repeat_time;
 
-    constexpr C_TYPE kTolerance = kDoubleToDouble
-        ? static_cast<C_TYPE>(1.0e-10)
-        : static_cast<C_TYPE>(1.0e-4);
+    constexpr C_TYPE kTolerance = kInt8ToInt32
+        ? static_cast<C_TYPE>(0)
+        : (kDoubleToDouble ? static_cast<C_TYPE>(1.0e-10)
+                           : static_cast<C_TYPE>(1.0e-4));
     const bool correct = run_baseline
         ? matches(result, reference, kTolerance, kTolerance)
         : true;

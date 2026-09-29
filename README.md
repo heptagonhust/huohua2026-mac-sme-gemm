@@ -26,6 +26,7 @@ huohua/
 │   ├── gemm.h                     # 公共声明（gemm_fp16 / baseline_gemm / SME asm 入口）
 │   ├── gemm.cpp                   # 主体函数部分
 │   ├── assemble_f32.s             # SME FP32 32x32 微内核
+│   ├── assemble_i8.s              # SME INT8→INT32 32x32 微内核
 │   ├── assemble_f64.s             # SME FP64 16x16 微内核
 │   └── bench.cpp                  # main：baseline 对比 + 正确性校验
 └── tmp/                           # 临时文件，包含跟踪 SME 探针源码（*.cpp / *.s）
@@ -134,24 +135,27 @@ huohua/
 
 ## 构建与运行
 
-项目提供四种独立精度构建；各目标使用独立对象目录，类型宏在 C++ 编译阶段传入，避免不同精度错误复用对象：
+项目提供五种独立精度构建；各目标使用独立对象目录，类型宏在 C++ 编译阶段传入，避免不同精度错误复用对象：
 
 ```bash
-make                          # 同时构建以下四个可执行文件
+make                          # 同时构建以下五个可执行文件
 make bench_half_2_single      # FP16 × FP16 → FP32
 make bench_bfloat_2_single    # BF16 × BF16 → FP32
 make bench_single_2_single    # FP32 × FP32 → FP32
+make bench_int8_2_int32       # INT8 × INT8 → INT32
 make bench_double_2_double    # FP64 × FP64 → FP64
 
 ./bench_half_2_single [file]  # 可传入自定义 "N M K" 列表文件
 ./bench_bfloat_2_single [file]
 ./bench_single_2_single [file]
+./bench_int8_2_int32 [file]
 ./bench_double_2_double [file]
 
 make run_half_2_single        # 使用 data/test.in
 make run_bfloat_2_single      # 使用 data/test.in
 make run_single_2_single      # 使用 data/test.in
+make run_int8_2_int32         # 使用 data/test.in
 make run_double_2_double      # 使用 data/test.in
 ```
 
-FP16、BF16 与 FP32 输入路径都会在 packing 阶段生成 FP32 k-major 面板，并共享 `src/assemble_f32.s` 中的 FP32 32×32 SME 微内核；BF16 在 packing 时精确扩展为 FP32，并未使用原生 `bfmopa`。FP64 路径生成 FP64 k-major 面板，并使用 `src/assemble_f64.s` 中独立的 FP64 16×16 SME 微内核。FP32 内核使用 `-march=armv9-a+sme2`，FP64 内核额外使用 `+sme-f64f64`；C++ 使用 `-march=native`。
+FP16、BF16 与 FP32 输入路径都会在 packing 阶段生成 FP32 k-major 面板，并共享 `src/assemble_f32.s` 中的 FP32 32×32 SME 微内核；BF16 在 packing 时精确扩展为 FP32，并未使用原生 `bfmopa`。INT8 路径使用 kr=4 的 INT8 packed panel 和 `src/assemble_i8.s` 中独立的 signed `smopa` 32×32 微内核，累加及输出为 INT32；benchmark 输入限制在 `[-8,8]`，正确性按逐元素精确相等判断。FP64 路径生成 FP64 k-major 面板，并使用 `src/assemble_f64.s` 中独立的 FP64 16×16 SME 微内核。FP32/INT8 内核使用 `-march=armv9-a+sme2`，FP64 内核额外使用 `+sme-f64f64`；C++ 使用 `-march=native`。

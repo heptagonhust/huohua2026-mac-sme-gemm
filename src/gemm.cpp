@@ -11,7 +11,10 @@ namespace {
 // One SME output micro-tile uses four ZA tiles: 32x32 for FP32 and 16x16
 // for FP64 at the 512-bit streaming vector length used by Apple M4.
 constexpr bool kUseFp64Kernel = std::is_same<C_TYPE, double>::value;
+constexpr bool kUseInt8Kernel = std::is_same<C_TYPE, int32_t>::value;
 constexpr std::size_t kTile = kUseFp64Kernel ? 16 : 32;
+constexpr std::size_t kReduction = kUseInt8Kernel ? 4 : 1;
+using PackType = std::conditional_t<kUseInt8Kernel, int8_t, C_TYPE>;
 // L2 budget for one RHS column band (paper formula 5).
 constexpr std::size_t kL2Bytes = 12u * 1024u * 1024u;
 
@@ -29,7 +32,7 @@ std::size_t band_ncols(std::size_t col0, std::size_t Nc, std::size_t K) {
 
 // Time to pack one band: read the configured input and write the packed panel.
 double est_pack_seconds(std::size_t M, std::size_t ncols) {
-    constexpr double kBytesPerElement = sizeof(B_TYPE) + sizeof(C_TYPE);
+    constexpr double kBytesPerElement = sizeof(B_TYPE) + sizeof(PackType);
     return static_cast<double>(M) * static_cast<double>(ncols) *
            kBytesPerElement / kPackBytesPerSecond;
 }
@@ -64,8 +67,9 @@ std::size_t compute_nc(std::size_t N, std::size_t M, std::size_t K) {
     if (K <= kTile) {
         return K;
     }
-    // Bytes of a single packed RHS column.
-    const std::size_t col_bytes = (M > 0 ? M : 1) * sizeof(C_TYPE);
+    // Bytes of a single packed RHS column, including reduction padding.
+    const std::size_t groups = (M + kReduction - 1) / kReduction;
+    const std::size_t col_bytes = groups * kReduction * sizeof(PackType);
     std::size_t cols = align_down(kL2Bytes / col_bytes, kTile);
     if (cols < kTile) {
         cols = kTile;
@@ -79,14 +83,27 @@ std::size_t compute_nc(std::size_t N, std::size_t M, std::size_t K) {
 // Pack one A row panel (mr rows x full inner M) into a k-major panel.
 // The configured input type is converted to the configured output type.
 // A_panel[k * lda + i] = (C_TYPE)A[(row0 + i) * M + k], lda == kTile.
-void pack_a_panel(const A_TYPE* A, C_TYPE* A_panel, std::size_t row0,
+void pack_a_panel(const A_TYPE* A, PackType* A_panel, std::size_t row0,
                   std::size_t mr, std::size_t M, std::size_t lda) {
+#if defined(HUOHUA_INT8)
+    const std::size_t groups = (M + 3) / 4;
+    for (std::size_t group = 0; group < groups; ++group) {
+        PackType* dst = A_panel + group * lda;
+        for (std::size_t i = 0; i < mr; ++i) {
+            for (std::size_t lane = 0; lane < 4; ++lane) {
+                const std::size_t k = group * 4 + lane;
+                dst[i * 4 + lane] = k < M ? A[(row0 + i) * M + k] : 0;
+            }
+        }
+    }
+#else
     for (std::size_t k = 0; k < M; ++k) {
         #pragma unroll(8)
         for (std::size_t i = 0; i < mr; ++i) {
             A_panel[k * lda + i] = static_cast<C_TYPE>(A[(row0 + i) * M + k]);
         }
     }
+#endif
 }
 
 // Pack one RHS column band into a k-major panel.
@@ -95,9 +112,21 @@ void pack_a_panel(const A_TYPE* A, C_TYPE* A_panel, std::size_t row0,
 // The body is deliberately unchanged (paper 4.2: packing primitives are
 // reused as-is); double buffering lives in the orchestrator below, which just
 // points this routine at one of two ping-pong slots.
-void pack_b_band(const B_TYPE* B, C_TYPE* B_panel, std::size_t col0,
+void pack_b_band(const B_TYPE* B, PackType* B_panel, std::size_t col0,
                  std::size_t ncols, std::size_t M, std::size_t K,
                  std::size_t ldb) {
+#if defined(HUOHUA_INT8)
+    const std::size_t groups = (M + 3) / 4;
+    for (std::size_t group = 0; group < groups; ++group) {
+        PackType* dst = B_panel + group * ldb;
+        for (std::size_t j = 0; j < ncols; ++j) {
+            for (std::size_t lane = 0; lane < 4; ++lane) {
+                const std::size_t k = group * 4 + lane;
+                dst[j * 4 + lane] = k < M ? B[k * K + col0 + j] : 0;
+            }
+        }
+    }
+#else
     for (std::size_t k = 0; k < M; ++k) {
         const B_TYPE* b_row = B + k * K + col0;
         #pragma unroll(8)
@@ -105,6 +134,7 @@ void pack_b_band(const B_TYPE* B, C_TYPE* B_panel, std::size_t col0,
             B_panel[k * ldb + j] = static_cast<C_TYPE>(b_row[j]);
         }
     }
+#endif
 }
 
 // Double-buffered RHS column-band producer (paper 4.5).
@@ -120,7 +150,7 @@ void pack_b_band(const B_TYPE* B, C_TYPE* B_panel, std::size_t col0,
 class BandPacker {
 public:
     BandPacker(const B_TYPE* B, std::size_t M, std::size_t K, std::size_t Nc,
-               std::size_t n_bands, C_TYPE* slot0, C_TYPE* slot1)
+               std::size_t n_bands, PackType* slot0, PackType* slot1)
         : B_(B), M_(M), K_(K), Nc_(Nc), n_bands_(n_bands) {
         slot_[0] = slot0;
         slot_[1] = slot1;
@@ -134,7 +164,7 @@ public:
     void start() { worker_ = std::thread([this] { run(); }); }
 
     // Blocks until band `band` is packed, then hands back its slot.
-    const C_TYPE* acquire(std::size_t band) {
+    const PackType* acquire(std::size_t band) {
         std::unique_lock<std::mutex> lock(mutex_);
         ready_.wait(lock, [&] { return produced_ > band; });
         return slot_[band & 1u];
@@ -175,7 +205,7 @@ private:
 
             const std::size_t col0 = band * Nc_;
             pack_b_band(B_, slot_[band & 1u], col0, band_ncols(col0, Nc_, K_),
-                        M_, K_, Nc_);
+                        M_, K_, Nc_ * kReduction);
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -190,7 +220,7 @@ private:
     std::size_t K_;
     std::size_t Nc_;
     std::size_t n_bands_;
-    C_TYPE* slot_[2];
+    PackType* slot_[2];
     std::thread worker_;
     std::mutex mutex_;
     std::condition_variable ready_;
@@ -205,19 +235,34 @@ private:
 // OVERWRITTEN, not accumulated into.  C may therefore hold garbage (gemm's
 // caller only promises the buffer exists) -- zeroing the tile first keeps the
 // two paths interchangeable.
-void scalar_microkernel(const C_TYPE* A_panel, int lda,
-                        const C_TYPE* B_panel, int ldb,
+void scalar_microkernel(const PackType* A_panel, int lda,
+                        const PackType* B_panel, int ldb,
                         C_TYPE* C, int ldc,
                         int mr, int nr, int kc) {
     for (int i = 0; i < mr; ++i) {
         C_TYPE* crow = C + static_cast<std::size_t>(i) * ldc;
         for (int j = 0; j < nr; ++j) {
-            crow[j] = 0.0f;
+            crow[j] = 0;
         }
     }
+#if defined(HUOHUA_INT8)
+    for (int group = 0; group < kc; ++group) {
+        const PackType* ap = A_panel + static_cast<std::size_t>(group) * lda;
+        const PackType* bp = B_panel + static_cast<std::size_t>(group) * ldb;
+        for (int i = 0; i < mr; ++i) {
+            C_TYPE* crow = C + static_cast<std::size_t>(i) * ldc;
+            for (int j = 0; j < nr; ++j) {
+                for (int lane = 0; lane < 4; ++lane) {
+                    crow[j] += static_cast<C_TYPE>(ap[i * 4 + lane]) *
+                               static_cast<C_TYPE>(bp[j * 4 + lane]);
+                }
+            }
+        }
+    }
+#else
     for (int k = 0; k < kc; ++k) {
-        const C_TYPE* ap = A_panel + static_cast<std::size_t>(k) * lda;
-        const C_TYPE* bp = B_panel + static_cast<std::size_t>(k) * ldb;
+        const PackType* ap = A_panel + static_cast<std::size_t>(k) * lda;
+        const PackType* bp = B_panel + static_cast<std::size_t>(k) * ldb;
         for (int i = 0; i < mr; ++i) {
             const C_TYPE a = ap[i];
             C_TYPE* crow = C + static_cast<std::size_t>(i) * ldc;
@@ -226,6 +271,7 @@ void scalar_microkernel(const C_TYPE* A_panel, int lda,
             }
         }
     }
+#endif
 }
 
 }  // namespace
@@ -243,9 +289,10 @@ void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
         return;
     }
 
+    const std::size_t reductions = (M + kReduction - 1) / kReduction;
     const std::size_t Nc = compute_nc(N, M, K);
-    const std::size_t lda = kTile;               // A panel width (rows per panel)
-    const std::size_t ldb = Nc;                  // B band width (columns)
+    const std::size_t lda = kTile * kReduction;
+    const std::size_t ldb = Nc * kReduction;
     const int ldc = static_cast<int>(K);
     const std::size_t n_bands = (K + Nc - 1) / Nc;
 
@@ -266,20 +313,21 @@ void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
         est_pack_seconds(M, Nc) <= 0.85 * est_compute_seconds(N, M, Nc);
 
     // Buffers: one A panel (kTile x M) plus one or two B bands (M x Nc).
-    const std::size_t band_elems = M * ldb;
+    const std::size_t band_elems = reductions * ldb;
     const std::size_t n_slots = overlap ? 2u : 1u;
-    C_TYPE* A_panel = static_cast<C_TYPE*>(std::malloc(M * lda * sizeof(C_TYPE)));
-    C_TYPE* band_mem = static_cast<C_TYPE*>(
-        std::malloc(n_slots * band_elems * sizeof(C_TYPE)));
+    PackType* A_panel = static_cast<PackType*>(
+        std::malloc(reductions * lda * sizeof(PackType)));
+    PackType* band_mem = static_cast<PackType*>(
+        std::malloc(n_slots * band_elems * sizeof(PackType)));
     if (A_panel == nullptr || band_mem == nullptr) {
         std::free(A_panel);
         std::free(band_mem);
         return;
     }
-    C_TYPE* slot[2] = {band_mem, overlap ? band_mem + band_elems : nullptr};
+    PackType* slot[2] = {band_mem, overlap ? band_mem + band_elems : nullptr};
 
     // Consume one packed band: every A row panel against every tile-wide slice.
-    auto compute_band = [&](const C_TYPE* band, std::size_t col0,
+    auto compute_band = [&](const PackType* band, std::size_t col0,
                             std::size_t ncols) {
         for (std::size_t row0 = 0; row0 < N; row0 += kTile) {
             const std::size_t mr = (row0 + kTile <= N) ? kTile : (N - row0);
@@ -291,7 +339,12 @@ void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
 
 #if defined(__aarch64__)
                 if (sme_ok && mr == kTile && nr == kTile) {
-#if defined(HUOHUA_FP64)
+#if defined(HUOHUA_INT8)
+                    huohua_sme_microkernel_i8_32x32(
+                        A_panel, static_cast<int>(lda),
+                        band + j0 * kReduction, static_cast<int>(ldb),
+                        ctile, ldc, static_cast<int>(reductions));
+#elif defined(HUOHUA_FP64)
                     huohua_sme_microkernel_f64_16x16(
                         A_panel, static_cast<int>(lda),
                         band + j0, static_cast<int>(ldb),
@@ -306,10 +359,11 @@ void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
 #endif
                 {
                     scalar_microkernel(A_panel, static_cast<int>(lda),
-                                       band + j0, static_cast<int>(ldb),
+                                       band + j0 * kReduction,
+                                       static_cast<int>(ldb),
                                        ctile, ldc,
                                        static_cast<int>(mr), static_cast<int>(nr),
-                                       static_cast<int>(M));
+                                       static_cast<int>(reductions));
                 }
             }
         }
@@ -324,7 +378,7 @@ void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
         packer.start();
         for (std::size_t i = 0; i < n_bands; ++i) {
             const std::size_t col0 = i * Nc;
-            const C_TYPE* band = packer.acquire(i);
+            const PackType* band = packer.acquire(i);
             compute_band(band, col0, band_ncols(col0, Nc, K));
             packer.release(i);
         }
