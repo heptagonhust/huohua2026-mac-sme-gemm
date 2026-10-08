@@ -103,11 +103,11 @@ huohua/
 
 ### 优化点 5：并行 / 重叠 packing
 
-- 状态：❌ 未做
-- 目标：后台线程（NEON/普通核）打包下一列带 ∥ SME 计算当前列带；双缓冲 + 常驻 worker + 原子握手，
-  带论文回退条件（列带数<2 / M<64 / packing>0.85×matmul 时退回串行）。
-- 改动面：`gemm.cpp` 外层列带循环 + 线程；`-pthread` 链接。
-- 验证口径：decode32/skinny-N 等全含口径 shape 提速。
+- 状态：⚠️ 部分实现
+- 已实现：当存在多个 RHS 列带、M≥64 且估算 packing 时间不超过估算 matmul 时间的 0.85 倍时，后台线程双缓冲打包后续 RHS 列带，与当前列带的 SME 计算重叠；不满足条件时使用同步打包。
+- 尚未实现：常驻 worker、A panel 并行打包、首个 RHS 列带与计算并行，以及论文所述的 NEON packing helper / 完整双 P-cluster 计算分工。
+- 代码位置：`src/gemm.cpp` 中 `BandPacker`（约第 140–229 行）、overlap 判定（约第 307–313 行）、A panel 同步打包与列带调度（约第 329–385 行）。
+- 注意：当前后台线程仅用于 RHS packing；每次 GEMM 调用创建并回收，不是常驻 SME 计算 worker。
 
 ### 优化点 6：half tile split-K 尾核
 
@@ -116,20 +116,23 @@ huohua/
   partial sum 保持 4 条依赖链。
 - 备注：小 / 不规则 shape（100³、232×129×505）收益最大。
 
-### 优化点 7：显式 cost model / dispatcher 与 tiny-shape 回退
+### 优化点 7：cost model / dispatcher 与 tiny-shape 回退
 
-- 状态：⚠️ 部分（已有 `compute_nc` 列带决策）
-- 目标：`est_tmatmul` 估算、tiny-shape 回退 1 线程、packing/overlap 阈值判定，收敛到论文 dispatcher。
+- 状态：⚠️ 部分实现
+- 已实现：依据 L2 预算计算 RHS 列带宽（`compute_nc`）；另有 packing / compute 时间的粗略估算，用于决定是否启用 RHS 后台双缓冲 overlap。
+- 尚未实现：论文完整的 `est_tmatmul` 调度模型及专门的 tiny-shape 单线程 dispatcher；当前 cost model 仅用于列带和 overlap 门控，不选择不同的 SME 计算策略。
+- 代码位置：`src/gemm.cpp` 中估算常量与模型（约第 21–43 行）、`compute_nc`（约第 65–80 行）、overlap 判定（约第 307–313 行）及统一 tile 遍历（约第 329–369 行）。
 
-### 优化点 8：双 P-cluster worker
+### 优化点 8：双 P-cluster 常驻 SME 计算 worker
 
-- 状态：❌ 本机不适用
-- 说明：这台 Apple M4 为单 P-cluster；论文 M4 Pro 双 cluster 的 SME worker 扩展在本机无收益
-  （只能用于并行 packing，见优化点 5）。
+- 状态：❌ 未实现（当前实现由调用线程执行 SME 计算；硬件适用性取决于具体 M4 型号）
+- 说明：论文中的双 P-cluster worker 扩展针对双 P-cluster 配置。当前代码没有双计算 worker；现有后台线程只执行 RHS packing，且每次 GEMM 调用创建并回收（见优化点 5）。本机是否具备双 P-cluster 属于硬件信息，不能仅凭代码判断。
 
 ## 实测结果（本机，data/test.in，11 类 shape）
 
-- 全部 shape `correct=yes`；相对朴素 baseline 加速约 18×–166×。
+- `data/test.in` 当前包含 11 个 shape；benchmark 对比朴素 ijk baseline，baseline 每个 shape 计时一次，优化路径预热一次后测量三次并取平均（见 `src/bench.cpp`）。
+- 这些数据只描述当前测试集及测量流程，不代表复现了论文完整的 shape 集、对照实现或评测方法；不同机器与运行负载也会影响结果。
+- 最近一次记录中，全部 shape `correct=yes`；相对朴素 baseline 加速约 18×–166×。
 - 峰值约 487 GFLOP/s，约为本机单 P-cluster SME FP32/FP16 峰值（~2009 GFLOP/s）的 24%。
   （优化点 2/3 落地后此项应显著上升。）
 
