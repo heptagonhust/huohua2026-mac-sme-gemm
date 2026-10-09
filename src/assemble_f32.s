@@ -108,6 +108,14 @@ _huohua_sme_microkernel_f32_32x32:
     // ---------------- K (inner) accumulation loop ----------------
 1:  ld1w {z0.s}, p0/z, [x13]            // a0 = A rows 0-15 @ k
     ld1w {z1.s}, p0/z, [x13, #1, MUL VL] // a1 = A rows 16-31 @ k
+    // Prefetch the RHS row 32 reductions ahead.  Each row address is derived
+    // from the current packed row pointer and the ABI-provided panel stride.
+    // The unsigned remaining-count check keeps the hint inside this panel.
+    cmp  w6, #32
+    b.ls 5f
+    add  x16, x14, x10, lsl #5
+    prfm pldl2keep, [x16]
+5:
     ld1w {z2.s}, p0/z, [x14]            // b0 = B cols 0-15 @ k
     ld1w {z3.s}, p0/z, [x14, #1, MUL VL] // b1 = B cols 16-31 @ k
 
