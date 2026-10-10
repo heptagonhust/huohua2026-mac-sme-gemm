@@ -28,6 +28,7 @@ endif
 HEADERS := src/gemm.h
 ASM_SOURCES := src/assemble_f32.s src/assemble_f64.s src/assemble_i8.s
 HALF_FLAGS := -DA_TYPE=__fp16 -DB_TYPE=__fp16 -DC_TYPE=float \
+              -DHUOHUA_FP16_WIDEN \
               -DPRECISION_NAME='"FP16 x FP16 -> FP32"'
 BFLOAT_FLAGS := -DA_TYPE=__bf16 -DB_TYPE=__bf16 -DC_TYPE=float \
                 -DPRECISION_NAME='"BF16 x BF16 -> FP32"'
@@ -40,7 +41,7 @@ DOUBLE_FLAGS := -DA_TYPE=double -DB_TYPE=double -DC_TYPE=double -DHUOHUA_FP64 \
 
 HALF_OBJ := build/half_2_single/bench.o \
             build/half_2_single/gemm.o \
-            build/half_2_single/assemble_f32.o
+            build/half_2_single/assemble_f16.o
 BFLOAT_OBJ := build/bfloat_2_single/bench.o \
               build/bfloat_2_single/gemm.o \
               build/bfloat_2_single/assemble_f32.o
@@ -98,6 +99,10 @@ build/double_2_double/%.o: src/%.cpp $(HEADERS) $(ASM_SOURCES)
 	$(CXX) $(CXXFLAGS) $(DOUBLE_FLAGS) -c $< -o $@
 
 build/half_2_single/assemble_f32.o: src/assemble_f32.s
+	@mkdir -p $(@D)
+	$(CXX) $(SME_F32_FLAGS) -c $< -o $@
+
+build/half_2_single/assemble_f16.o: src/assemble_f16.s
 	@mkdir -p $(@D)
 	$(CXX) $(SME_F32_FLAGS) -c $< -o $@
 
