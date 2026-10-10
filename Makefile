@@ -26,7 +26,7 @@ SME_F64_FLAGS :=
 endif
 
 HEADERS := src/gemm.h
-ASM_SOURCES := src/assemble_f32.s src/assemble_f64.s src/assemble_i8.s
+ASM_SOURCES := src/assemble_f16.s src/assemble_f32.s src/assemble_f64.s src/assemble_i8.s
 HALF_FLAGS := -DA_TYPE=__fp16 -DB_TYPE=__fp16 -DC_TYPE=float \
               -DHUOHUA_FP16_WIDEN \
               -DPRECISION_NAME='"FP16 x FP16 -> FP32"'
