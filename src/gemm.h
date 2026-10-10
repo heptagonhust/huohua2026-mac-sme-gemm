@@ -69,6 +69,12 @@ void huohua_sme_microkernel_f16_32x32(const __fp16* A_panel, int lda,
                                       const __fp16* B_panel, int ldb,
                                       float* C, int ldc, int kc_groups);
 
+// BF16 packed panels (kr=2 lane-pair layout), widening BF16->FP32 BFMOPA,
+// four ZA32 tiles, 32x32 output tile.
+void huohua_sme_microkernel_bf16_32x32(const __bf16* A_panel, int lda,
+                                       const __bf16* B_panel, int ldb,
+                                       float* C, int ldc, int kc_groups);
+
 // Signed INT8 packed groups (kr=4), four ZA32 tiles, 32x32 output tile.
 void huohua_sme_microkernel_i8_32x32(const int8_t* A_panel, int lda,
                                      const int8_t* B_panel, int ldb,

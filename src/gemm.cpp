@@ -13,17 +13,23 @@ namespace {
 constexpr bool kUseFp64Kernel = std::is_same<C_TYPE, double>::value;
 constexpr bool kUseInt8Kernel = std::is_same<C_TYPE, int32_t>::value;
 constexpr std::size_t kTile = kUseFp64Kernel ? 16 : 32;
-// FP16 inputs use the SME widening FP16->FP32 kernel with kr=2 lane pairs
-// (paper Sec. 4.2); every other precision keeps the original kr=1 (or INT8
-// kr=4) k-major layout, so the packed panels are byte-identical to before.
+// FP16 and BF16 both use the SME widening 16-bit->FP32 kernel with kr=2 lane
+// pairs (paper Sec. 4.2); every other precision keeps the original kr=1 (or
+// INT8 kr=4) k-major layout, so those packed panels stay byte-identical.
 #if defined(HUOHUA_FP16_WIDEN)
 constexpr bool kFp16Widening = true;
 #else
 constexpr bool kFp16Widening = false;
 #endif
-constexpr std::size_t kReduction = kFp16Widening ? 2 : (kUseInt8Kernel ? 4 : 1);
+#if defined(HUOHUA_BF16_WIDEN)
+constexpr bool kBf16Widening = true;
+#else
+constexpr bool kBf16Widening = false;
+#endif
+constexpr bool kWidening16 = kFp16Widening || kBf16Widening;
+constexpr std::size_t kReduction = kWidening16 ? 2 : (kUseInt8Kernel ? 4 : 1);
 using PackType = std::conditional_t<kUseInt8Kernel, int8_t,
-                  std::conditional_t<kFp16Widening, B_TYPE, C_TYPE>>;
+                  std::conditional_t<kWidening16, B_TYPE, C_TYPE>>;
 // L2 budget for one RHS column band (paper formula 5).
 constexpr std::size_t kL2Bytes = 12u * 1024u * 1024u;
 
@@ -109,7 +115,7 @@ void pack_a_panel(const A_TYPE* A, PackType* A_panel, std::size_t row0,
                 const std::size_t k = group * kReduction + lane;
                 dst[i * kReduction + lane] =
                     k < M ? static_cast<PackType>(A[(row0 + i) * M + k])
-                          : static_cast<PackType>(0);
+                          : PackType{};
             }
         }
     }
@@ -134,7 +140,7 @@ void pack_b_band(const B_TYPE* B, PackType* B_panel, std::size_t col0,
                 const std::size_t k = group * kReduction + lane;
                 dst[j * kReduction + lane] =
                     k < M ? static_cast<PackType>(B[k * K + col0 + j])
-                          : static_cast<PackType>(0);
+                          : PackType{};
             }
         }
     }
@@ -331,6 +337,11 @@ void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
                 if (sme_ok && mr == kTile && nr == kTile) {
 #if defined(HUOHUA_FP16_WIDEN)
                     huohua_sme_microkernel_f16_32x32(
+                        A_panel, static_cast<int>(lda),
+                        band + j0 * kReduction, static_cast<int>(ldb),
+                        ctile, ldc, static_cast<int>(reductions));
+#elif defined(HUOHUA_BF16_WIDEN)
+                    huohua_sme_microkernel_bf16_32x32(
                         A_panel, static_cast<int>(lda),
                         band + j0 * kReduction, static_cast<int>(ldb),
                         ctile, ldc, static_cast<int>(reductions));

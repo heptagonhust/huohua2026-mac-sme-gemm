@@ -31,6 +31,7 @@ HALF_FLAGS := -DA_TYPE=__fp16 -DB_TYPE=__fp16 -DC_TYPE=float \
               -DHUOHUA_FP16_WIDEN \
               -DPRECISION_NAME='"FP16 x FP16 -> FP32"'
 BFLOAT_FLAGS := -DA_TYPE=__bf16 -DB_TYPE=__bf16 -DC_TYPE=float \
+                -DHUOHUA_BF16_WIDEN \
                 -DPRECISION_NAME='"BF16 x BF16 -> FP32"'
 SINGLE_FLAGS := -DA_TYPE=float -DB_TYPE=float -DC_TYPE=float \
                 -DPRECISION_NAME='"FP32 x FP32 -> FP32"'
@@ -44,7 +45,7 @@ HALF_OBJ := build/half_2_single/bench.o \
             build/half_2_single/assemble_f16.o
 BFLOAT_OBJ := build/bfloat_2_single/bench.o \
               build/bfloat_2_single/gemm.o \
-              build/bfloat_2_single/assemble_f32.o
+              build/bfloat_2_single/assemble_bf16.o
 SINGLE_OBJ := build/single_2_single/bench.o \
               build/single_2_single/gemm.o \
               build/single_2_single/assemble_f32.o
@@ -107,6 +108,10 @@ build/half_2_single/assemble_f16.o: src/assemble_f16.s
 	$(CXX) $(SME_F32_FLAGS) -c $< -o $@
 
 build/bfloat_2_single/assemble_f32.o: src/assemble_f32.s
+	@mkdir -p $(@D)
+	$(CXX) $(SME_F32_FLAGS) -c $< -o $@
+
+build/bfloat_2_single/assemble_bf16.o: src/assemble_bf16.s
 	@mkdir -p $(@D)
 	$(CXX) $(SME_F32_FLAGS) -c $< -o $@
 

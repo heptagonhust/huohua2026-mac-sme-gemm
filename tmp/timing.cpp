@@ -15,14 +15,14 @@ static double time_best(std::size_t N, std::size_t M, std::size_t K,
                         int reps, double warm_ms) {
     std::mt19937 gen(12345);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    std::vector<__fp16> A(N * M), B(M * K);
-    std::vector<float> C(N * K, 0.0f);
-    for (__fp16& v : A) v = static_cast<__fp16>(dist(gen));
-    for (__fp16& v : B) v = static_cast<__fp16>(dist(gen));
+    std::vector<A_TYPE> A(N * M), B(M * K);
+    std::vector<C_TYPE> C(N * K, 0.0f);
+    for (A_TYPE& v : A) v = static_cast<A_TYPE>(dist(gen));
+    for (B_TYPE& v : B) v = static_cast<B_TYPE>(dist(gen));
 
     auto run = [&] {
         const auto t0 = Clock::now();
-        gemm_fp16(A.data(), B.data(), C.data(), N, M, K);
+        gemm(A.data(), B.data(), C.data(), N, M, K);
         return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
     };
 

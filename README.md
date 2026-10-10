@@ -5,10 +5,10 @@
 
 - 输入：A（N×M）、B（M×K），均为 **FP16**、行主序一维数组；输出 C（N×K）为 FP32。
 - 索引约定：`A[i*M + j]`、`B[j*K + k]`、`C[i*K + k]`。
-- 算法口径：当前落地的是论文 **FP16→FP32 路径**（FP16 输入、FP32 累加与输出）；
-  FP16 精度已切换到论文的 **FP16 加宽 FMOPA kr=2 内核**（`src/assemble_f16.s`，每条
-  指令覆盖相邻 2 个 k，打包按 lane-pair 交错）；BF16/FP32 路径仍走 **FP32 FMOPA** 内核
-  （`src/assemble_f32.s`）。
+- 算法口径：当前落地的是论文 **FP16→FP32 路径**（16-bit 输入、FP32 累加与输出）；
+  **FP16 与 BF16** 精度都已切换到论文的**加宽 FMOPA / BFMOPA kr=2 内核**
+  （`src/assemble_f16.s` / `src/assemble_bf16.s`，每条指令覆盖相邻 2 个 k，打包按 lane-pair
+  交错）；FP32 精度仍走 **FP32 FMOPA** 内核（`src/assemble_f32.s`）。
 - 整体思路：C++ 侧做「分块 + 打包 + 调度」编排，真正的算术由 `src/assemble_*.s` 中的
   **手写 SME 汇编微内核**完成（Apple clang 无 `arm_sme2.h` 且 C++ 直接开 `+sme` 会触发
   SVE 自动向量化导致 SIGILL，因此内核必须用 `-march=armv9-a+sme2` 单独手写汇编）。
@@ -27,6 +27,7 @@ huohua/
 │   ├── gemm.h                     # 公共声明（gemm_fp16 / baseline_gemm / SME asm 入口）
 │   ├── gemm.cpp                   # 主体函数部分
 │   ├── assemble_f16.s             # SME FP16 加宽 FMOPA 32x32 微内核（kr=2 lane pair）
+│   ├── assemble_bf16.s            # SME BF16 加宽 BFMOPA 32x32 微内核（kr=2 lane pair）
 │   ├── assemble_f32.s             # SME FP32 32x32 微内核
 │   ├── assemble_i8.s              # SME INT8→INT32 32x32 微内核
 │   ├── assemble_f64.s             # SME FP64 16x16 微内核
@@ -39,16 +40,16 @@ huohua/
 | # | 优化点 | 状态 |
 |---|--------|------|
 | 1 | SME 汇编微内核底座（FP32 FMOPA） | ✅ 完成 |
-| 2 | **FP16 加宽 FMOPA 内核（kr=2 lane pair）** | ✅ 完成 |
+| 2 | **FP16 / BF16 加宽 FMOPA 内核（kr=2 lane pair）** | ✅ 完成 |
 | 3 | 软件流水 / SME2 多向量 load | ⚠️ 已实现，实测收益 ≈ 0 |
-| 4 | L2 定向 prefetch（`pldl2keep`） | ⚠️ 已实现（仅 FP32/BF16 内核） |
+| 4 | L2 定向 prefetch（`pldl2keep`） | ⚠️ 已实现（仅 FP32 精度路径） |
 | 5 | 并行 / 重叠 packing | ⚠️ 部分（仅 RHS 双缓冲） |
 | 6 | half tile split-K 尾核 | ❌ 未做 |
 | 7 | cost model / dispatcher 与 tiny-shape 回退 | ⚠️ 部分 |
 | 8 | 双 P-cluster 常驻 worker | ❌ 不适用（本机单 P-cluster） |
 
-**当前性能**：FP16→FP32，4096³ = **1455 GFLOP/s**，为本机单 P-cluster 指令级峰值（~2009）
-的 **72%**（优化点 2 之前为 52%）；已达本机**饱和微基准实测上限**（~1829）的约 80%，
+**当前性能**：4096³ 在 FP16 与 BF16 上分别达 **1455 / 1475 GFLOP/s**，为本机单 P-cluster
+指令级峰值（~2009）的 **72% / 73%**；已达本机**饱和微基准实测上限**（~1829）的约 80%，
 扣除 packing 后内核本身约 **93%**。
 
 **本机硬件**：Apple M4（`Mac16,10`，4P+6E，**单 P-cluster / 单 SME 单元**，非 M4 Pro）。
@@ -56,9 +57,9 @@ huohua/
 
 ### 三条必须知道的实测陷阱
 
-1. **加宽 FMOPA 的谓词粒度**：`fmopa za.s, …, z.h, z.h` 必须配 **`.h` 谓词**（32 lane 全 1）。
-   误用 `.s` 谓词时奇数 half-lane 被**静默屏蔽**，指令退化为 rank-1 更新（1024→512 FLOP），
-   结果“看似正确”却少一半累加项。
+1. **加宽 FMOPA / BFMOPA 的谓词粒度**：`fmopa` / `bfmopa za.s, …, z.h, z.h` 必须配 **`.h`
+   谓词**（32 lane 全 1）。误用 `.s` 谓词时奇数 half-lane 被**静默屏蔽**，指令退化为 rank-1
+   更新（1024→512 FLOP），结果“看似正确”却少一半累加项。
 2. **SME2 多向量 load 的汇编语法**：只能写成**连字符区间 + `pn8` 谓词**，即
    `ld1h {z0.h-z1.h}, pn8/z, [x13]`；逗号形式 `{z0.h, z1.h}` 或配 `p0/z` 会被汇编器
    判为 invalid operand（易被误认为“汇编器不支持”）。
@@ -67,12 +68,13 @@ huohua/
 
 ### 本次变更
 
-- 新增 `src/assemble_f16.s`：FP16 加宽 32×32 SME 微内核（kr=2 lane-pair + SME2 多向量 load），
-  同时提供 `huohua_sme_svl_bytes`。
+- 新增 `src/assemble_f16.s` / `src/assemble_bf16.s`：FP16 / BF16 加宽 32×32 SME 微内核
+  （kr=2 lane-pair + SME2 多向量 load），并各自提供 `huohua_sme_svl_bytes`。
 - `src/gemm.cpp`：打包 `pack_a_panel`/`pack_b_band` 与 `scalar_microkernel` 统一为通用 kr
-  布局（kr=1 与改造前逐字节一致），新增 FP16 分派分支。
-- `src/gemm.h`：新增 `huohua_sme_microkernel_f16_32x32` 声明。
-- `Makefile`：half 目标加 `-DHUOHUA_FP16_WIDEN`，链接 `assemble_f16.o`。
+  布局（kr=1 与改造前逐字节一致），新增 FP16 与 BF16 两条分派分支。
+- `src/gemm.h`：新增 `huohua_sme_microkernel_f16_32x32` / `_bf16_32x32` 声明。
+- `Makefile`：half / bfloat 目标分别加 `-DHUOHUA_FP16_WIDEN` / `-DHUOHUA_BF16_WIDEN`，
+  分别链接 `assemble_f16.o` / `assemble_bf16.o`。
 - `tmp/`：新增多组 SME 语义探针与 `time_best` 计时工具（见“临时探针”一节）。
 
 ## 优化点进度
@@ -92,8 +94,8 @@ huohua/
 - **FP16 输入通路**（论文全含口径起点）：`gemm_fp16`/`baseline_gemm` 均读 `__fp16`
   输入；bench 随机生成 FP32 后转 FP16 存储，贴近论文“FP16 行主序输入”。
 - **k-major 打包 + FP16→FP32 加宽**：A 面板 / B 列带在打包时把 FP16 转成 k-major FP32
-  布局，使微内核内层 K 循环顺序读流。（这是 BF16 / FP32 路径的做法；**纯 FP16 路径已在
-  优化点 2 改为加宽 FMOPA + lane-pair 打包，不再在打包阶段加宽**。）
+  布局，使微内核内层 K 循环顺序读流。（这是 FP32 路径的做法；**FP16 / BF16 已在优化点 2
+  改为加宽 FMOPA / BFMOPA + lane-pair 打包，不再在打包阶段加宽**。）
 - **L2 列带切分 + 行分块**：按 12 MiB L2 预算（论文公式 5）把 RHS 切成列带（对齐 32），
   N 维按 32 行 m-block 分块，使 B 列带驻留 L2 并在各 m-block 间复用。
 - **标量回退**：不满足 32×32 的边缘 tile（`mr/nr<32`）与非 aarch64 平台走标量微内核，
@@ -124,14 +126,17 @@ huohua/
 
 ---
 
-### 优化点 2：FP16 加宽 FMOPA 内核（kr=2、lane pair）（已完成 ✅）
+### 优化点 2：FP16 / BF16 加宽 FMOPA 内核（kr=2、lane pair）（已完成 ✅）
 
-- 状态：✅ 已完成（`src/assemble_f16.s` + `gemm.cpp` 的 FP16 kr=2 打包路径）
+- 状态：✅ 已完成（`src/assemble_f16.s` / `src/assemble_bf16.s` + `gemm.cpp` 的 kr=2 打包路径）
+- 覆盖精度：**FP16**（`fmopa za.s, …, z.h, z.h`，FEAT_SME_F16F32）与 **BF16**
+  （`bfmopa za.s, …, z.h, z.h`，FEAT_SME_B16F32）。两者共用完全相同的 kr=2 lane-pair 布局与
+  内核结构，唯一差别是助记符；BF16 此前是「打包时加宽成 FP32 再走 FP32 内核」。
 - 内核：`fmopa za0.s, p1/m, p1/m, z0.h, z1.h`，一条指令覆盖相邻 2 个 k，完成 1024 FLOP，
   4 个 ZA32 tile 覆盖 32×32 输出；整个 tile 只进出一次 streaming mode。
 - 打包（论文 4.2 `mr=nr=32, kr=2`）：A/B panel 内每行相邻 2 个 k 交错成 lane pair——
   向量 lane `2i` = 第 i 行 k0、lane `2i+1` = 第 i 行 k1；`lda=ldb=64`（halves）。
-- **关键坑（已在 `assemble_f16.s` 注释留档）**：加宽 FMOPA 的谓词按 16-bit 粒度求值，
+- **关键坑（已在 `assemble_f16.s` / `assemble_bf16.s` 注释留档）**：加宽 FMOPA / BFMOPA 的谓词按 16-bit 粒度求值，
   必须用 **`.h` 谓词**（32 lane 全 1）。若误用 `.s` 谓词，奇数 half-lane 被静默屏蔽，
   指令退化成 `ZA[i][j] = A[2i]·B[2j]` 的 rank-1 更新（只剩 512 FLOP），结果看似正确、
   实则少一半累加项。实测：`.s` 谓词下 `A=[1,1]·B=[1,1] → ZA[0][0]=1`；`.h` 谓词下
@@ -157,6 +162,24 @@ huohua/
     256    256    256       664.4       718.6     +8%
 ```
 
+BF16 同口径 A/B（`time_best`，15 次取最优；旧 = 打包加宽 + FP32 内核，新 = BF16 加宽 BFMOPA）：
+
+```plain
+      N      M      K   旧(FP32 内核)  BF16 加宽   提升
+                        (GFLOP/s)      (GFLOP/s)
+   1024   1024   1024      968.8        1267.8    +31%
+   1024   4096   1024      917.8        1244.1    +36%
+   4096   4096   4096     1181.6        1474.8    +25%
+    512   4096   4096      975.9        1164.8    +19%
+    512   4096  11008      903.4        1281.3    +42%
+   2048   2048     64      385.2         397.3     +3%
+    256    256    256      684.8         723.5     +6%
+    128    128    128      414.3         432.0     +4%
+    100    100    100      118.5         144.6    +22%
+    232    505    129      221.0         246.4    +11%
+   4096    256     64      359.2         356.7     -1%
+```
+
 - 备注：本机为单 P-cluster 的 M4（非 M4 Pro），分母用 ~2009 GFLOP/s；论文的 4018 双
   cluster 峰值与「双 cluster」优化在本机不适用。
 
@@ -180,7 +203,9 @@ huohua/
 
 - 状态：⚠️ 已实现并完成初步评测，收益依赖 shape，尚未确认为普遍收益
 - 实现：FP32 SME K 循环在剩余 reduction 数大于 32 时，对当前 packed RHS panel 中前瞻 32 个 reduction 的行发出一次 `prfm pldl2keep`；`w6` 边界判断跳过短 K 和尾部预取，不预取 A。代码见 `src/assemble_f32.s` 的 K 循环（约第 111–117 行）。
-- **FP16 内核未接入**：FP16 走 `src/assemble_f16.s`，其中的 K 循环目前没有预取；如需在 FP16 上验证 L2 预取收益，需把同样的 `prfm pldl2keep` 加到 `assemble_f16.s`。
+- **覆盖范围**：预取目前只在 `src/assemble_f32.s`，即仅 **FP32 精度路径**受益。FP16
+  （`assemble_f16.s`）与 BF16（`assemble_bf16.s`）的 K 循环都没有预取；如需验证其收益，
+  需把同样的 `prfm pldl2keep` 加进对应内核。
 - 正确性记录：预取开/关版本均在 Apple M4 独立构建；一次确定性比较覆盖 `(N,M,K)=(32,1,32)、(32,32,32)、(32,33,32)、(32,64,64)、(32,65,96)、(64,1024,1024)`，均与 FP32 标量参考一致且输出有限。另一次 `32×64×64` checksum 对照一致。测试 harness 和原始日志未纳入仓库，以上为本地实验记录。
 - 性能记录（Apple M4，共享机器，交替 A/B）：首轮长 K 测量每版本 15 个样本，`512×2048×2048` 中位数 4.673 ms（关）/4.473 ms（开），约快 4.3%；`512×4096×1024` 为 6.079/5.578 ms，约快 8.3%。后续长 K 复测每版本 35 个样本，对应中位数为 4.453/4.420 ms（约快 0.8%）和 5.806/5.578 ms（约快 3.9%）。短/中 K 复测的最后三轮中位数显示 `128×512×512` 约快 3.2%，`256×1024×1024` 约慢 7.5%。原始逐样本日志未保存到仓库，且不同轮次有波动。
 - 结论：构建和上述正确性比较通过；性能收益依 shape 且跨轮波动，尚未证明稳定的端到端收益，也没有确定通用启用阈值。以上数据是实验记录，不应视为可复现的基准档案或普遍加速结论。
@@ -216,12 +241,12 @@ huohua/
 
 - `data/test.in` 当前包含 11 个 shape；benchmark 对比朴素 ijk baseline，baseline 每个 shape 计时一次，优化路径预热一次后测量三次并取平均（见 `src/bench.cpp`）。
 - 这些数据只描述当前测试集及测量流程，不代表复现了论文完整的 shape 集、对照实现或评测方法；不同机器与运行负载也会影响结果。
-- 最近一次记录中，全部 shape `correct=yes`；相对朴素 baseline 加速约 7×（32³）–1411×（4096³）
+- 最近一次记录中，全部 shape `correct=yes`；相对朴素 baseline 加速约 7×（32³）–1421×（4096³）
   （朴素 baseline 太慢，加速比数值主要说明口径，不代表与论文 baseline 的对比）。
-- FP16 路径峰值约 **1455 GFLOP/s**，约为本机单 P-cluster SME 峰值（~2009 GFLOP/s）的 **72%**
-  （优化点 2 落地前为 52%）。本机饱和微基准测得的指令级实用上限约 1829 GFLOP/s，故 4096³
-  已达实用上限的约 80%（扣掉 packing 后内核本身约 93%）；优化点 3 的软件流水 / 多向量 load
-  经验证无进一步收益（见优化点 3）。
+- FP16 与 BF16 路径峰值均约 **1455 GFLOP/s**（4096³），约为本机单 P-cluster SME 峰值
+  （~2009 GFLOP/s）的 **72%**（优化点 2 落地前 FP16 为 52%）。本机饱和微基准测得的指令级
+  实用上限约 1829 GFLOP/s，故 4096³ 已达实用上限的约 80%（扣掉 packing 后内核本身约 93%）；
+  优化点 3 的软件流水 / 多向量 load 经验证无进一步收益（见优化点 3）。
 
 ## 临时探针与工具（`tmp/`）
 
@@ -234,7 +259,7 @@ huohua/
 | `multivec_probe.cpp` | 验证 `ld1h {z0.h-z1.h}, pn8/z` 在 streaming mode 可执行 |
 | `peak_f16_load.cpp` | 加宽 FMOPA 饱和微基准（本机指令级上限 ≈ 1829 GFLOP/s） |
 | `timing.cpp` | 低噪声 `time_best` 计时 harness（论文口径，绕过朴素 baseline） |
-| `bf16_probe.cpp` | 验证 BF16 加宽 `bfmopa` 语义与 FP16 一致（BF16 路径尚未接入） |
+| `bf16_probe.cpp` | 验证 BF16 加宽 `bfmopa` 语义与 FP16 一致（BF16 路径已据此接入） |
 
 运行示例：
 
@@ -249,12 +274,10 @@ clang++ -std=c++17 -O3 -march=native -pthread -Isrc \
 
 ## 后续工作
 
-- **BF16 加宽内核（最大未兑现收益）**：`bfmopa za.s, …, z.h, z.h`（FEAT_SME_B16F32）在本机
-  实测语义与 FP16 完全一致（见 `tmp/bf16_probe.cpp`）。BF16 目前仍在打包阶段加宽成 FP32
-  再走 FP32 内核，可套用与 FP16 相同的 kr=2 lane-pair 方案。
 - **压缩 packing 开销**（优化点 5 完整化）：4096³ 全含时间中 packing 约占 13–20%，是当前
   距实用上限的主要缺口。
-- 把 L2 定向 prefetch（优化点 4）接入 FP16 内核——目前只在 `src/assemble_f32.s`（FP32/BF16 路径）。
+- 把 L2 定向 prefetch（优化点 4）接入 FP16 / BF16 内核——目前只在 `src/assemble_f32.s`，
+  即只有 FP32 精度路径受益。
 - half tile split-K 尾核（优化点 6）。
 - INT8 已使用等价的加宽 `smopa za.s, …, z.b, z.b`（8→32）+ kr=4；FP32/FP64 无更窄输入的
   加宽形式，不适用本优化。
@@ -284,7 +307,7 @@ make run_int8_2_int32         # 使用 data/test.in
 make run_double_2_double      # 使用 data/test.in
 ```
 
-FP16 路径生成 **kr=2 lane-pair 的 FP16 k-major 面板**，并使用 `src/assemble_f16.s` 中的
-**FP16 加宽 32×32 SME 微内核**（`fmopa za.s, ..., z.h, z.h`，是论文的算力内核）。BF16 与
-FP32 输入路径则在 packing 阶段生成 FP32 k-major 面板，共享 `src/assemble_f32.s` 中的
-FP32 32×32 SME 微内核；BF16 在 packing 时精确扩展为 FP32，并未使用原生 `bfmopa`。INT8 路径使用 kr=4 的 INT8 packed panel 和 `src/assemble_i8.s` 中独立的 signed `smopa` 32×32 微内核，累加及输出为 INT32；benchmark 输入限制在 `[-8,8]`，正确性按逐元素精确相等判断。FP64 路径生成 FP64 k-major 面板，并使用 `src/assemble_f64.s` 中独立的 FP64 16×16 SME 微内核。FP16/FP32/INT8 内核使用 `-march=armv9-a+sme2`，FP64 内核额外使用 `+sme-f64f64`；C++ 使用 `-march=native`。
+FP16 / BF16 路径分别生成 **kr=2 lane-pair 的 16-bit k-major 面板**，并使用 `src/assemble_f16.s`
+/ `src/assemble_bf16.s` 中的**加宽 32×32 SME 微内核**（`fmopa` / `bfmopa za.s, ..., z.h, z.h`，
+即论文的算力内核）。FP32 输入路径则生成 FP32 k-major 面板，使用 `src/assemble_f32.s` 中的
+FP32 32×32 SME 微内核。INT8 路径使用 kr=4 的 INT8 packed panel 和 `src/assemble_i8.s` 中独立的 signed `smopa` 32×32 微内核，累加及输出为 INT32；benchmark 输入限制在 `[-8,8]`，正确性按逐元素精确相等判断。FP64 路径生成 FP64 k-major 面板，并使用 `src/assemble_f64.s` 中独立的 FP64 16×16 SME 微内核。FP16/BF16/FP32/INT8 内核使用 `-march=armv9-a+sme2`，FP64 内核额外使用 `+sme-f64f64`；C++ 使用 `-march=native`。
