@@ -44,7 +44,7 @@ huohua/
 | 3 | 软件流水 / SME2 多向量 load | ⚠️ 已实现，实测收益 ≈ 0 |
 | 4 | L2 定向 prefetch（`pldl2keep`） | ⚠️ 已实现（仅 FP32 精度路径） |
 | 5 | 并行 / 重叠 packing | ⚠️ 部分（仅 RHS 双缓冲） |
-| 6 | half tile split-K 尾核 | ❌ 未做 |
+| 6 | half tile split-K 尾核 | ⚠️ 部分（仅half tile） |
 | 7 | cost model / dispatcher 与 tiny-shape 回退 | ⚠️ 部分 |
 | 8 | 双 P-cluster 常驻 worker | ❌ 不适用（本机单 P-cluster） |
 
@@ -220,10 +220,11 @@ BF16 同口径 A/B（`time_best`，15 次取最优；旧 = 打包加宽 + FP32 �
 
 ### 优化点 6：half tile split-K 尾核
 
-- 状态：❌ 未做
-- 目标：16×32 / 32×16 / 16×16 尾核（对齐粒度降到 16），减少边缘标量回退；空闲 tile 转 split-K
-  partial sum 保持 4 条依赖链。
-- 备注：小 / 不规则 shape（100³、232×129×505）收益最大。
+- 状态：⚠️ half-tile 尾核已实现并完成 M4 正确性验证；split-K partial sum 尚未实现/评估。
+- 已实现：FP16/BF16 widening 路径支持 16×32、32×16、16×16 SME 边缘核；小于 16 的剩余边缘继续走 scalar microkernel。复用现有 kr=2 lane-pair packing，主 32×32 核及其他精度分派保持不变。
+- 验证：在 Apple M4 上 `make clean && make CXX=clang++` 后，FP16/BF16 的 `data/test.in` 和 `data/tail_test.in` 均 `correct=yes`。专项测试中程序输出 GFLOP/s：100×100×100 FP16 144.4 / BF16 137.9；232×129×505 FP16 302.0 / BF16 293.3（bench 的优化路径三次取平均，机器负载会影响结果）。
+- 测试输入：`data/tail_test.in` 覆盖 100×100×100、232×129×505 及 16/32 tile 边界组合。
+- 尚未实现：空闲 ZA tile 用于 split-K partial sum。当前 M4 只有一个 SME；是否有收益需独立实验，不与 half-tile dispatch 混合评估。
 
 ### 优化点 7：cost model / dispatcher 与 tiny-shape 回退
 

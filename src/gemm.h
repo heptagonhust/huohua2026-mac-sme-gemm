@@ -68,10 +68,28 @@ void huohua_sme_microkernel_f32_32x32(const float* A_panel, int lda,
 void huohua_sme_microkernel_f16_32x32(const __fp16* A_panel, int lda,
                                       const __fp16* B_panel, int ldb,
                                       float* C, int ldc, int kc_groups);
+void huohua_sme_microkernel_f16_16x32(const __fp16* A_panel, int lda,
+                                      const __fp16* B_panel, int ldb,
+                                      float* C, int ldc, int kc_groups);
+void huohua_sme_microkernel_f16_32x16(const __fp16* A_panel, int lda,
+                                      const __fp16* B_panel, int ldb,
+                                      float* C, int ldc, int kc_groups);
+void huohua_sme_microkernel_f16_16x16(const __fp16* A_panel, int lda,
+                                      const __fp16* B_panel, int ldb,
+                                      float* C, int ldc, int kc_groups);
 
 // BF16 packed panels (kr=2 lane-pair layout), widening BF16->FP32 BFMOPA,
 // four ZA32 tiles, 32x32 output tile.
 void huohua_sme_microkernel_bf16_32x32(const __bf16* A_panel, int lda,
+                                       const __bf16* B_panel, int ldb,
+                                       float* C, int ldc, int kc_groups);
+void huohua_sme_microkernel_bf16_16x32(const __bf16* A_panel, int lda,
+                                       const __bf16* B_panel, int ldb,
+                                       float* C, int ldc, int kc_groups);
+void huohua_sme_microkernel_bf16_32x16(const __bf16* A_panel, int lda,
+                                       const __bf16* B_panel, int ldb,
+                                       float* C, int ldc, int kc_groups);
+void huohua_sme_microkernel_bf16_16x16(const __bf16* A_panel, int lda,
                                        const __bf16* B_panel, int ldb,
                                        float* C, int ldc, int kc_groups);
 

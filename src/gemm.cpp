@@ -276,8 +276,9 @@ void scalar_microkernel(const PackType* A_panel, int lda,
 // C orchestrator: L2 column bands + row panels + k-major packing, with the
 // RHS band double-buffered so that packing overlaps SME compute.
 // A: N x M, B: M x K, C: N x K using the configured precision.
-// Full tiles use the FP32 32x32 or FP64 16x16 SME micro-kernel; edge tiles
-// and machines with an unsupported vector length use scalar_microkernel.
+// Full tiles use the configured SME micro-kernel; FP16/BF16 edges of at least
+// 16 rows and columns use widening half-tile kernels, while smaller residuals
+// and unsupported streaming vector lengths use scalar_microkernel.
 // ---------------------------------------------------------------------------
 void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
                std::size_t N, std::size_t M, std::size_t K) {
@@ -333,8 +334,88 @@ void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
                 const std::size_t nr = (j0 + kTile <= ncols) ? kTile : (ncols - j0);
                 C_TYPE* ctile = C + row0 * K + col0 + j0;
 
+                bool tail_kernel_used = false;
 #if defined(__aarch64__)
-                if (sme_ok && mr == kTile && nr == kTile) {
+                if constexpr (kFp16Widening || kBf16Widening) {
+                    if (sme_ok && mr >= 16 && nr >= 16) {
+                        const std::size_t sme_mr = mr >= 32 ? 32 : 16;
+                        const std::size_t sme_nr = nr >= 32 ? 32 : 16;
+                        const PackType* b_tile = band + j0 * kReduction;
+#if defined(HUOHUA_FP16_WIDEN) || defined(HUOHUA_BF16_WIDEN)
+                        const PackType* a_tile = A_panel;
+                        C_TYPE* sme_c = ctile;
+#if defined(HUOHUA_FP16_WIDEN)
+                        if (sme_mr == 32 && sme_nr == 32) {
+                            huohua_sme_microkernel_f16_32x32(
+                                a_tile, static_cast<int>(lda), b_tile,
+                                static_cast<int>(ldb), sme_c, ldc,
+                                static_cast<int>(reductions));
+                        } else if (sme_mr == 16 && sme_nr == 32) {
+                            huohua_sme_microkernel_f16_16x32(
+                                a_tile, static_cast<int>(lda), b_tile,
+                                static_cast<int>(ldb), sme_c, ldc,
+                                static_cast<int>(reductions));
+                        } else if (sme_mr == 32 && sme_nr == 16) {
+                            huohua_sme_microkernel_f16_32x16(
+                                a_tile, static_cast<int>(lda), b_tile,
+                                static_cast<int>(ldb), sme_c, ldc,
+                                static_cast<int>(reductions));
+                        } else {
+                            huohua_sme_microkernel_f16_16x16(
+                                a_tile, static_cast<int>(lda), b_tile,
+                                static_cast<int>(ldb), sme_c, ldc,
+                                static_cast<int>(reductions));
+                        }
+#elif defined(HUOHUA_BF16_WIDEN)
+                        if (sme_mr == 32 && sme_nr == 32) {
+                            huohua_sme_microkernel_bf16_32x32(
+                                a_tile, static_cast<int>(lda), b_tile,
+                                static_cast<int>(ldb), sme_c, ldc,
+                                static_cast<int>(reductions));
+                        } else if (sme_mr == 16 && sme_nr == 32) {
+                            huohua_sme_microkernel_bf16_16x32(
+                                a_tile, static_cast<int>(lda), b_tile,
+                                static_cast<int>(ldb), sme_c, ldc,
+                                static_cast<int>(reductions));
+                        } else if (sme_mr == 32 && sme_nr == 16) {
+                            huohua_sme_microkernel_bf16_32x16(
+                                a_tile, static_cast<int>(lda), b_tile,
+                                static_cast<int>(ldb), sme_c, ldc,
+                                static_cast<int>(reductions));
+                        } else {
+                            huohua_sme_microkernel_bf16_16x16(
+                                a_tile, static_cast<int>(lda), b_tile,
+                                static_cast<int>(ldb), sme_c, ldc,
+                                static_cast<int>(reductions));
+                        }
+#endif
+#endif
+                        const std::size_t scalar_rows = mr - sme_mr;
+                        const std::size_t scalar_cols = nr - sme_nr;
+                        if (scalar_cols != 0) {
+                            scalar_microkernel(
+                                A_panel, static_cast<int>(lda),
+                                band + (j0 + sme_nr) * kReduction,
+                                static_cast<int>(ldb), ctile + sme_nr, ldc,
+                                static_cast<int>(mr),
+                                static_cast<int>(scalar_cols),
+                                static_cast<int>(reductions));
+                        }
+                        if (scalar_rows != 0) {
+                            scalar_microkernel(
+                                A_panel + sme_mr * kReduction,
+                                static_cast<int>(lda), b_tile,
+                                static_cast<int>(ldb), ctile + sme_mr * K, ldc,
+                                static_cast<int>(scalar_rows),
+                                static_cast<int>(sme_nr),
+                                static_cast<int>(reductions));
+                        }
+                        tail_kernel_used = true;
+                    }
+                }
+#endif
+#if defined(__aarch64__)
+                if (!tail_kernel_used && sme_ok && mr == kTile && nr == kTile) {
 #if defined(HUOHUA_FP16_WIDEN)
                     huohua_sme_microkernel_f16_32x32(
                         A_panel, static_cast<int>(lda),
@@ -361,9 +442,10 @@ void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
                         band + j0, static_cast<int>(ldb),
                         ctile, ldc, static_cast<int>(M));
 #endif
-                } else
+                    tail_kernel_used = true;
+                }
 #endif
-                {
+                if (!tail_kernel_used) {
                     scalar_microkernel(A_panel, static_cast<int>(lda),
                                        band + j0 * kReduction,
                                        static_cast<int>(ldb),

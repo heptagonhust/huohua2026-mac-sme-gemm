@@ -166,6 +166,134 @@ _huohua_sme_microkernel_f16_32x32:
 8:  ret                             // unsupported SVL: leave C untouched
 
 // ---------------------------------------------------------------------------
+// Half-tile kernels: shape-specialized ZA subsets. These retain the same
+// panel strides and overwrite semantics as the full kernel.
+    .globl _huohua_sme_microkernel_f16_16x32
+_huohua_sme_microkernel_f16_16x32:
+    mov w7, #1
+    b .Lf16_half_entry
+    .globl _huohua_sme_microkernel_f16_32x16
+_huohua_sme_microkernel_f16_32x16:
+    mov w7, #2
+    b .Lf16_half_entry
+    .globl _huohua_sme_microkernel_f16_16x16
+_huohua_sme_microkernel_f16_16x16:
+    mov w7, #0
+.Lf16_half_entry:
+    rdsvl x15, #1
+    cmp x15, #64
+    b.ne .Lf16_half_unsupported
+    stp d8, d9, [sp, #-64]!
+    stp d10, d11, [sp, #16]
+    stp d12, d13, [sp, #32]
+    stp d14, d15, [sp, #48]
+    sxtw x9, w1
+    lsl x9, x9, #1
+    sxtw x10, w3
+    lsl x10, x10, #1
+    sxtw x11, w5
+    lsl x11, x11, #2
+    smstart
+    mov x13, x0
+    mov x14, x2
+    ptrue p1.h
+    ptrue pn8.h
+    ptrue p2.s
+    zero {za}
+    cmp w7, #0
+    b.eq .Lf16_half_16x16
+    cmp w7, #1
+    b.eq .Lf16_half_16x32
+    b .Lf16_half_32x16
+
+.Lf16_half_16x16:
+    cbz w6, .Lf16_half_store_16x16
+.Lf16_half_k_16x16:
+    ld1h {z0.h}, p1/z, [x13]
+    ld1h {z2.h}, p1/z, [x14]
+    fmopa za0.s, p1/m, p1/m, z0.h, z2.h
+    add x13, x13, x9
+    add x14, x14, x10
+    subs w6, w6, #1
+    b.ne .Lf16_half_k_16x16
+.Lf16_half_store_16x16:
+    mov w12, #0
+    mov x16, x4
+.Lf16_half_store_loop_16x16:
+    mov z4.s, p2/m, za0h.s[w12, 0]
+    st1w {z4.s}, p2, [x16]
+    add x16, x16, x11
+    add w12, w12, #1
+    cmp w12, #16
+    b.lt .Lf16_half_store_loop_16x16
+    b .Lf16_half_done
+
+.Lf16_half_16x32:
+    cbz w6, .Lf16_half_store_16x32
+.Lf16_half_k_16x32:
+    ld1h {z0.h-z1.h}, pn8/z, [x13]
+    ld1h {z2.h-z3.h}, pn8/z, [x14]
+    fmopa za0.s, p1/m, p1/m, z0.h, z2.h
+    fmopa za1.s, p1/m, p1/m, z0.h, z3.h
+    add x13, x13, x9
+    add x14, x14, x10
+    subs w6, w6, #1
+    b.ne .Lf16_half_k_16x32
+.Lf16_half_store_16x32:
+    mov w12, #0
+    mov x16, x4
+.Lf16_half_store_loop_16x32:
+    mov z4.s, p2/m, za0h.s[w12, 0]
+    mov z5.s, p2/m, za1h.s[w12, 0]
+    st1w {z4.s}, p2, [x16]
+    st1w {z5.s}, p2, [x16, #1, MUL VL]
+    add x16, x16, x11
+    add w12, w12, #1
+    cmp w12, #16
+    b.lt .Lf16_half_store_loop_16x32
+    b .Lf16_half_done
+
+.Lf16_half_32x16:
+    cbz w6, .Lf16_half_store_32x16
+.Lf16_half_k_32x16:
+    ld1h {z0.h-z1.h}, pn8/z, [x13]
+    ld1h {z2.h}, p1/z, [x14]
+    fmopa za0.s, p1/m, p1/m, z0.h, z2.h
+    fmopa za2.s, p1/m, p1/m, z1.h, z2.h
+    add x13, x13, x9
+    add x14, x14, x10
+    subs w6, w6, #1
+    b.ne .Lf16_half_k_32x16
+.Lf16_half_store_32x16:
+    mov w12, #0
+    mov x16, x4
+.Lf16_half_store_top_32x16:
+    mov z4.s, p2/m, za0h.s[w12, 0]
+    st1w {z4.s}, p2, [x16]
+    add x16, x16, x11
+    add w12, w12, #1
+    cmp w12, #16
+    b.lt .Lf16_half_store_top_32x16
+    lsl x15, x11, #4
+    add x16, x4, x15
+    mov w12, #0
+.Lf16_half_store_bottom_32x16:
+    mov z4.s, p2/m, za2h.s[w12, 0]
+    st1w {z4.s}, p2, [x16]
+    add x16, x16, x11
+    add w12, w12, #1
+    cmp w12, #16
+    b.lt .Lf16_half_store_bottom_32x16
+.Lf16_half_done:
+    smstop
+    ldp d10, d11, [sp, #16]
+    ldp d12, d13, [sp, #32]
+    ldp d14, d15, [sp, #48]
+    ldp d8, d9, [sp], #64
+.Lf16_half_unsupported:
+    ret
+
+// ---------------------------------------------------------------------------
 // unsigned huohua_sme_svl_bytes(void)
 //   Returns the streaming SVE vector length in bytes (RDSVL).  Readable
 //   outside streaming mode; requires FEAT_SME.  (Shared by every SME kernel;
