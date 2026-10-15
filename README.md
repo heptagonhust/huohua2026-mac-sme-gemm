@@ -37,6 +37,8 @@ huohua/
 
 ## 进度总览
 
+### 论文复现部分
+
 | # | 优化点 | 状态 |
 |---|--------|------|
 | 1 | SME 汇编微内核底座（FP32 FMOPA） | ✅ 完成 |
@@ -54,6 +56,18 @@ huohua/
 
 **本机硬件**：Apple M4（`Mac16,10`，4P+6E，**单 P-cluster / 单 SME 单元**，非 M4 Pro）。
 论文的双 cluster（4018 GFLOP/s）优化在本机不适用，评测分母统一取 ~2009 GFLOP/s。
+
+### 算子优化部分
+
+| 优先级 | 算子或融合 | 进度 |
+|--------|------------|------|
+| 高 | GEMM / Linear + bias + ReLU / clamp | ❌ 未开始 |
+| 高 | GEMM / Linear + bias + GELU / SiLU | ❌ 未开始 |
+| 高 | 卷积 + bias + activation（implicit-GEMM） | ❌ 未开始 |
+| 探索性 | Attention：QKᵀ + scale/mask + softmax + PV（分块 / 在线 softmax） | ❌ 未开始 |
+| 中 | MLP / FFN 各线性层的 bias / activation 融合 | ❌ 未开始 |
+| 高 | GEMM + residual add + activation | ❌ 未开始 |
+| 探索性 | Linear + LayerNorm / RMSNorm | ❌ 未开始 |
 
 ### 三条必须知道的实测陷阱
 
