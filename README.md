@@ -44,7 +44,7 @@ huohua/
 | 3 | 软件流水 / SME2 多向量 load | ⚠️ 已实现，实测收益 ≈ 0 |
 | 4 | L2 定向 prefetch（`pldl2keep`） | ⚠️ 已实现（仅 FP32 精度路径） |
 | 5 | 并行 / 重叠 packing | ⚠️ 部分（仅 RHS 双缓冲） |
-| 6 | half tile split-K 尾核 | ⚠️ 部分（仅half tile） |
+| 6 | half tile split-K 尾核 | ⚠️ 已实现，但split-k没有可重复收益 |
 | 7 | cost model / dispatcher 与 tiny-shape 回退 | ⚠️ 部分 |
 | 8 | 双 P-cluster 常驻 worker | ❌ 不适用（本机单 P-cluster） |
 
@@ -225,6 +225,7 @@ BF16 同口径 A/B（`time_best`，15 次取最优；旧 = 打包加宽 + FP32 �
 - 验证：在 Apple M4 上 `make clean && make CXX=clang++` 后，FP16/BF16 的 `data/test.in` 和 `data/tail_test.in` 均 `correct=yes`。专项测试中程序输出 GFLOP/s：100×100×100 FP16 144.4 / BF16 137.9；232×129×505 FP16 302.0 / BF16 293.3（bench 的优化路径三次取平均，机器负载会影响结果）。
 - 测试输入：`data/tail_test.in` 覆盖 100×100×100、232×129×505 及 16/32 tile 边界组合。
 - 尚未实现：空闲 ZA tile 用于 split-K partial sum。当前 M4 只有一个 SME；是否有收益需独立实验，不与 half-tile dispatch 混合评估。
+- split-K 原型开发中：实验开关 `SPLIT_K_EXPERIMENT=1`，当前仅作用于 reductions≥64 的单个 16×16 输出 tile，两条 ZA 累加链；默认构建关闭。M4 correctness shapes 全部 `correct=yes`。现有 GFLOP/s A/B 尚无稳定提升，故不建议默认启用；split-on/off 单次程序输出会受共享机器状态影响，需继续重复测量。现有 bench 没有输出守卫/sentinel 专项测试，覆盖语义尚待单独验证。
 
 ### 优化点 7：cost model / dispatcher 与 tiny-shape 回退
 

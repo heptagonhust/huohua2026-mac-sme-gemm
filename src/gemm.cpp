@@ -344,6 +344,25 @@ void gemm(const A_TYPE* A, const B_TYPE* B, C_TYPE* C,
 #if defined(HUOHUA_FP16_WIDEN) || defined(HUOHUA_BF16_WIDEN)
                         const PackType* a_tile = A_panel;
                         C_TYPE* sme_c = ctile;
+#if defined(HUOHUA_SPLIT_K_EXPERIMENT)
+                        if (sme_mr == 16 && sme_nr == 16 && reductions >= 64 &&
+                            reductions / 2 >= 1) {
+#if defined(HUOHUA_FP16_WIDEN)
+                            huohua_sme_microkernel_f16_16x16_split2(
+                                a_tile, static_cast<int>(lda), b_tile,
+                                static_cast<int>(ldb), sme_c, ldc,
+                                static_cast<int>(reductions),
+                                static_cast<int>(reductions / 2));
+#elif defined(HUOHUA_BF16_WIDEN)
+                            huohua_sme_microkernel_bf16_16x16_split2(
+                                a_tile, static_cast<int>(lda), b_tile,
+                                static_cast<int>(ldb), sme_c, ldc,
+                                static_cast<int>(reductions),
+                                static_cast<int>(reductions / 2));
+#endif
+                            tail_kernel_used = true;
+                        } else
+#endif
 #if defined(HUOHUA_FP16_WIDEN)
                         if (sme_mr == 32 && sme_nr == 32) {
                             huohua_sme_microkernel_f16_32x32(

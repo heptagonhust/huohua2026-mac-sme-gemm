@@ -1,5 +1,6 @@
 #include "gemm.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -71,6 +72,48 @@ bool matches(const std::vector<C_TYPE>& actual,
     }
     return true;
 }
+
+#if defined(HUOHUA_SPLIT_K_EXPERIMENT)
+bool output_contract_matches(const A_TYPE* A, const B_TYPE* B,
+                             const std::vector<C_TYPE>& expected,
+                             std::size_t N, std::size_t M, std::size_t K,
+                             C_TYPE tolerance) {
+    constexpr std::size_t kGuardElements = 16;
+    const std::size_t output_elements = expected.size();
+    if (output_elements > std::numeric_limits<std::size_t>::max() -
+                              2 * kGuardElements) {
+        return false;
+    }
+
+    const C_TYPE canary = static_cast<C_TYPE>(314159.25);
+    const C_TYPE poison = static_cast<C_TYPE>(-98765.5);
+    std::vector<C_TYPE> guarded(output_elements + 2 * kGuardElements, canary);
+    C_TYPE* output = guarded.data() + kGuardElements;
+    auto guards_intact = [&] {
+        for (std::size_t i = 0; i < kGuardElements; ++i) {
+            if (guarded[i] != canary ||
+                guarded[kGuardElements + output_elements + i] != canary) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto output_matches = [&] {
+        const std::vector<C_TYPE> actual(output, output + output_elements);
+        return matches(actual, expected, tolerance, tolerance);
+    };
+
+    gemm(A, B, output, N, M, K);
+    if (!guards_intact() || !output_matches()) {
+        return false;
+    }
+
+    std::fill(output, output + output_elements, poison);
+    gemm(A, B, output, N, M, K);
+    return guards_intact() && output_matches();
+}
+#endif
+
 
 // ---------------------------------------------------------------------------
 // Warm-up
@@ -153,9 +196,24 @@ int run_gemm(const std::size_t N, const std::size_t M, const std::size_t K,
         ? static_cast<C_TYPE>(0)
         : (kDoubleToDouble ? static_cast<C_TYPE>(1.0e-10)
                            : static_cast<C_TYPE>(1.0e-4));
-    const bool correct = run_baseline
+    bool correct = run_baseline
         ? matches(result, reference, kTolerance, kTolerance)
         : true;
+#if defined(HUOHUA_SPLIT_K_EXPERIMENT) && \
+    (defined(HUOHUA_FP16_WIDEN) || defined(HUOHUA_BF16_WIDEN))
+    if (N == 16 && K == 16 && M / 2 + M % 2 >= 64) {
+        if (!run_baseline) {
+            baseline_gemm(A.data(), B.data(), reference.data(), N, M, K);
+        }
+        const bool output_contract_correct = output_contract_matches(
+            A.data(), B.data(), reference, N, M, K, kTolerance);
+        if (run_baseline) {
+            correct = correct && output_contract_correct;
+        } else {
+            correct = output_contract_correct;
+        }
+    }
+#endif
     
     // GEMM performs 2*N*M*K floating-point operations.
     const double flops = 2.0 * static_cast<double>(N) *

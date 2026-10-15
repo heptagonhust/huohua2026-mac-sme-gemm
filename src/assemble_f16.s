@@ -293,6 +293,80 @@ _huohua_sme_microkernel_f16_16x16:
 .Lf16_half_unsupported:
     ret
 
+    .globl _huohua_sme_microkernel_f16_16x16_split2
+_huohua_sme_microkernel_f16_16x16_split2:
+// reduction-chain partials; the final epilogue adds them before overwriting C.
+// The split point is a kc_groups boundary (one group is one kr=2 pair).
+    rdsvl x15, #1
+    cmp x15, #64
+    b.ne .Lf16_split2_unsupported
+    cmp w7, w6
+    b.hi .Lf16_split2_unsupported
+    stp d8, d9, [sp, #-64]!
+    stp d10, d11, [sp, #16]
+    stp d12, d13, [sp, #32]
+    stp d14, d15, [sp, #48]
+    sxtw x9, w1
+    lsl x9, x9, #1
+    sxtw x10, w3
+    lsl x10, x10, #1
+    sxtw x11, w5
+    lsl x11, x11, #2
+    mov w8, w6
+    mov w17, w7
+    mov w16, w7
+    smstart
+    mov x13, x0
+    mov x14, x2
+    ptrue p1.h
+    ptrue p2.s
+    zero {za}
+    cmp w16, #0
+    b.eq .Lf16_split2_second_start
+.Lf16_split2_first:
+    ld1h {z0.h}, p1/z, [x13]
+    ld1h {z2.h}, p1/z, [x14]
+    fmopa za0.s, p1/m, p1/m, z0.h, z2.h
+    add x13, x13, x9
+    add x14, x14, x10
+    subs w16, w16, #1
+    b.ne .Lf16_split2_first
+.Lf16_split2_second_start:
+    // Use the caller-provided split point; the second chain consumes the rest.
+    uxtw x15, w17
+    madd x13, x15, x9, x0
+    madd x14, x15, x10, x2
+    sub w16, w8, w17
+    cmp w16, #0
+    b.eq .Lf16_split2_epilogue
+.Lf16_split2_second:
+    ld1h {z0.h}, p1/z, [x13]
+    ld1h {z2.h}, p1/z, [x14]
+    fmopa za1.s, p1/m, p1/m, z0.h, z2.h
+    add x13, x13, x9
+    add x14, x14, x10
+    subs w16, w16, #1
+    b.ne .Lf16_split2_second
+.Lf16_split2_epilogue:
+    mov w12, #0
+    mov x16, x4
+.Lf16_split2_store:
+    mov z4.s, p2/m, za0h.s[w12, 0]
+    mov z5.s, p2/m, za1h.s[w12, 0]
+    fadd z4.s, p2/m, z4.s, z5.s
+    st1w {z4.s}, p2, [x16]
+    add x16, x16, x11
+    add w12, w12, #1
+    cmp w12, #16
+    b.lt .Lf16_split2_store
+    smstop
+    ldp d10, d11, [sp, #16]
+    ldp d12, d13, [sp, #32]
+    ldp d14, d15, [sp, #48]
+    ldp d8, d9, [sp], #64
+.Lf16_split2_unsupported:
+    ret
+
 // ---------------------------------------------------------------------------
 // unsigned huohua_sme_svl_bytes(void)
 //   Returns the streaming SVE vector length in bytes (RDSVL).  Readable

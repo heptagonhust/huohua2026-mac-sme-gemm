@@ -33,6 +33,11 @@ HALF_FLAGS := -DA_TYPE=__fp16 -DB_TYPE=__fp16 -DC_TYPE=float \
 BFLOAT_FLAGS := -DA_TYPE=__bf16 -DB_TYPE=__bf16 -DC_TYPE=float \
                 -DHUOHUA_BF16_WIDEN \
                 -DPRECISION_NAME='"BF16 x BF16 -> FP32"'
+SPLIT_K_EXPERIMENT ?= 0
+ifeq ($(SPLIT_K_EXPERIMENT),1)
+HALF_FLAGS += -DHUOHUA_SPLIT_K_EXPERIMENT
+BFLOAT_FLAGS += -DHUOHUA_SPLIT_K_EXPERIMENT
+endif
 SINGLE_FLAGS := -DA_TYPE=float -DB_TYPE=float -DC_TYPE=float \
                 -DPRECISION_NAME='"FP32 x FP32 -> FP32"'
 INT8_FLAGS := -DA_TYPE=int8_t -DB_TYPE=int8_t -DC_TYPE=int32_t \
@@ -79,13 +84,25 @@ bench_int8_2_int32: $(INT8_OBJ)
 bench_double_2_double: $(DOUBLE_OBJ)
 	$(CXX) $(DOUBLE_OBJ) $(LDFLAGS) -o $@
 
-build/half_2_single/%.o: src/%.cpp $(HEADERS) $(ASM_SOURCES)
+build/half_2_single/bench.o: src/bench.cpp $(HEADERS) .build-split-k-config-$(SPLIT_K_EXPERIMENT)
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) $(HALF_FLAGS) -c $< -o $@
 
-build/bfloat_2_single/%.o: src/%.cpp $(HEADERS) $(ASM_SOURCES)
+build/half_2_single/gemm.o: src/gemm.cpp $(HEADERS) .build-split-k-config-$(SPLIT_K_EXPERIMENT)
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(HALF_FLAGS) -c $< -o $@
+
+build/bfloat_2_single/bench.o: src/bench.cpp $(HEADERS) .build-split-k-config-$(SPLIT_K_EXPERIMENT)
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) $(BFLOAT_FLAGS) -c $< -o $@
+
+build/bfloat_2_single/gemm.o: src/gemm.cpp $(HEADERS) .build-split-k-config-$(SPLIT_K_EXPERIMENT)
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(BFLOAT_FLAGS) -c $< -o $@
+
+.build-split-k-config-$(SPLIT_K_EXPERIMENT):
+	@rm -f .build-split-k-config-*
+	@touch $@
 
 build/single_2_single/%.o: src/%.cpp $(HEADERS) $(ASM_SOURCES)
 	@mkdir -p $(@D)
@@ -152,4 +169,5 @@ run_double_2_double: bench_double_2_double
 
 clean:
 	rm -rf build bench_half_2_single bench_bfloat_2_single \
-	       bench_single_2_single bench_int8_2_int32 bench_double_2_double
+	       bench_single_2_single bench_int8_2_int32 bench_double_2_double \
+	       .build-split-k-config-*
